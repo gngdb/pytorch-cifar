@@ -10,22 +10,26 @@ from torch.autograd import Variable
 
 
 class SepConv(nn.Module):
-    '''Separable Convolution.'''
+    '''Separable Convolution: grouped followed by pointwise
+    (https://arxiv.org/abs/1610.02357).'''
     def __init__(self, in_planes, out_planes, kernel_size, stride):
         super(SepConv, self).__init__()
-        self.conv1 = nn.Conv2d(in_planes, out_planes,
+        self.conv1 = nn.Conv2d(in_planes, in_planes,
                                kernel_size, stride,
                                padding=(kernel_size-1)//2,
                                bias=False, groups=in_planes)
-        self.bn1 = nn.BatchNorm2d(out_planes)
+        self.bn1 = nn.BatchNorm2d(in_planes)
+        self.conv2 = nn.Conv2d(in_planes, out_planes, 1, 1,
+                               bias=False)
+        self.bn2 = nn.BatchNorm2d(out_planes)
 
     def forward(self, x):
-        return self.bn1(self.conv1(x))
+        return self.bn2(self.conv2(self.bn1(self.conv1(x))))
 
 
-class CellA(nn.Module):
+class Cell1(nn.Module):
     def __init__(self, in_planes, out_planes, stride=1):
-        super(CellA, self).__init__()
+        super(Cell1, self).__init__()
         self.stride = stride
         self.sep_conv1 = SepConv(in_planes, out_planes, kernel_size=7, stride=stride)
         if stride==2:
@@ -39,9 +43,9 @@ class CellA(nn.Module):
             y2 = self.bn1(self.conv1(y2))
         return F.relu(y1+y2)
 
-class CellB(nn.Module):
+class Cell2(nn.Module):
     def __init__(self, in_planes, out_planes, stride=1):
-        super(CellB, self).__init__()
+        super(Cell2, self).__init__()
         self.stride = stride
         # Left branch
         self.sep_conv1 = SepConv(in_planes, out_planes, kernel_size=7, stride=stride)
@@ -70,14 +74,23 @@ class CellB(nn.Module):
         y = torch.cat([b1,b2], 1)
         return F.relu(self.bn2(self.conv2(y)))
 
+class CIFARStem(nn.Module):
+    def __init__(self, num_planes):
+        super(CIFARStem, self).__init__()
+        self.conv1 = nn.Conv2d(3, num_planes, kernel_size=3, stride=1, padding=1, bias=False)
+        self.bn1 = nn.BatchNorm2d(num_planes)
+
+    def forward(self, x):
+        return F.relu(self.bn1(self.conv1(x)))
+
 class PNASNet(nn.Module):
     def __init__(self, cell_type, num_cells, num_planes):
         super(PNASNet, self).__init__()
         self.in_planes = num_planes
         self.cell_type = cell_type
 
-        self.conv1 = nn.Conv2d(3, num_planes, kernel_size=3, stride=1, padding=1, bias=False)
-        self.bn1 = nn.BatchNorm2d(num_planes)
+        # stem
+        self.stem = CIFARStem(num_planes)
 
         self.layer1 = self._make_layer(num_planes, num_cells=6)
         self.layer2 = self._downsample(num_planes*2)
@@ -100,7 +113,7 @@ class PNASNet(nn.Module):
         return layer
 
     def forward(self, x):
-        out = F.relu(self.bn1(self.conv1(x)))
+        out = self.stem(x)
         out = self.layer1(out)
         out = self.layer2(out)
         out = self.layer3(out)
@@ -111,18 +124,19 @@ class PNASNet(nn.Module):
         return out
 
 
-def PNASNetA():
-    return PNASNet(CellA, num_cells=6, num_planes=44)
+def PNASNet1():
+    return PNASNet(Cell1, num_cells=6, num_planes=44)
 
-def PNASNetB():
-    return PNASNet(CellB, num_cells=6, num_planes=32)
+def PNASNet2():
+    return PNASNet(Cell2, num_cells=6, num_planes=32)
 
 
 def test():
-    net = PNASNetB()
+    net = PNASNet2()
     print(net)
     x = Variable(torch.randn(1,3,32,32))
     y = net(x)
     print(y)
 
-# test()
+if __name__ == '__main__':
+    test()
