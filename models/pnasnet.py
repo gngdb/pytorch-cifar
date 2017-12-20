@@ -27,8 +27,72 @@ class SepConv(nn.Module):
         return self.bn2(self.conv2(self.bn1(self.conv1(x))))
 
 
+class FactorizedReduction(nn.Module):
+    """
+    Hack to ensure input from previous block is always the same shape as the
+    input from the current block.
+    """
+    def __init__(self, prev_in_shape, planes):
+        super(FactorizedReduction, self).__init__()
+        # two branches, with avgpool offset in one branch, but not in the other 
+        _, c, h, w = prev_in_shape
+        self.avgpoolA = nn.AvgPool2d(2)
+        self.pointwiseA = nn.Conv2d(c, planes//2)
+        self.padB = nn.ZeroPad2d((0,1,0,1))
+        self.avgpoolB = nn.AvgPool2d(2)
+        self.pointwiseB(c, planes//2)
+        # after concat, batchnorm
+        self.bn = nn.BatchNorm2d(planes)
+
+    def forward(self, x):
+        out = F.relu(x)
+        branchA = self.avgpoolA(out)
+        branchA = self.pointwiseA(branchA)
+        branchB = self.padB(out)
+        branchB = self.avgpoolB(branchB)
+        branchB = self.pointwiseB(branchB)
+        out = torch.cat([branchA, branchB], 1)
+        return self.bn(out)
+
+
+class CellBase(nn.Module):
+    """Implements base transformations to ensure uniform number of
+    channels and shape before applying transformations. Not really discussed in
+    the paper, but present in the code."""
+    def __init__(self, prev_in_shape, in_shape, planes, stride=1):
+        super(BaseCell, self).__init__()
+        # assumed that previous layer has just concatenated everything together
+        # for this layer to deal with
+        _, pc, ph, pw = prev_in_shape
+        _, c, h, w = in_shape
+        assert ph == pw and h == w
+        if ph != h:
+            self.prev_transform = FactorizedReduction(prev_in_shape)
+        elif pc != c:
+            # prepare sequential pointwise
+            layers = []
+            layers.append(nn.ReLU())
+            layers.append(nn.Conv2d(pc, planes, 1))
+            layers.append(nn.BatchNorm2d(planes))
+            self.prev_transform = nn.Sequential(*layers)
+        else:
+            # do nothing
+            self.prev_transform = lambda x: x
+        # then need standard transformation for current
+        layers = []
+        layers.append(nn.ReLU())
+        layers.append(nn.Conv2d(c, planes, 1))
+        layers.append(nn.BatchNorm2d(planes))
+        self.current_transform = nn.Sequential(*layers)
+        
+    def forward(self, current, prev):
+        out_prev = self.prev_transform(prev)
+        out_current = self.current_transform(current)
+        return out_current, out_prev
+    
+
 class Cell1(nn.Module):
-    def __init__(self, in_planes, out_planes, stride=1):
+    def __init__(self, prev_in_shape, in_shape, planes, stride=1):
         super(Cell1, self).__init__()
         self.stride = stride
         self.sep_conv1 = SepConv(in_planes, out_planes, kernel_size=7, stride=stride)
@@ -77,7 +141,7 @@ class Cell2(nn.Module):
 
 
 class Cell3(nn.Module):
-    def __init__(self, in_planes, out_planes, stride=1):
+    def __init__(self, prev_in_shape, in_shape, planes, stride=1):
         super(Cell3, self).__init__()
         self.stride = stride
         # Left branch
