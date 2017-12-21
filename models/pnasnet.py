@@ -100,7 +100,7 @@ class Cell1(nn.Module):
             self.conv1 = nn.Conv2d(in_planes, out_planes, kernel_size=1, stride=1, padding=0, bias=False)
             self.bn1 = nn.BatchNorm2d(out_planes)
 
-    def forward(self, prev_x, x):
+    def forward(self, x, prev_x):
         y1 = self.sep_conv1(x)
         y2 = F.max_pool2d(x, kernel_size=3, stride=self.stride, padding=1)
         if self.stride==2:
@@ -124,7 +124,7 @@ class Cell2(nn.Module):
         self.conv2 = nn.Conv2d(2*out_planes, out_planes, kernel_size=1, stride=1, padding=0, bias=False)
         self.bn2 = nn.BatchNorm2d(out_planes)
 
-    def forward(self, prev_x, x):
+    def forward(self, x, prev_x):
         # Left branch
         y1 = self.sep_conv1(x)
         y2 = self.sep_conv2(x)
@@ -153,7 +153,7 @@ class Cell3(nn.Module):
         self.conv2 = nn.Conv2d(2*out_planes, out_planes, kernel_size=1, stride=1, padding=0, bias=False)
         self.bn2 = nn.BatchNorm2d(out_planes)
 
-    def forward(self, prev_x, x):
+    def forward(self, x, prev_x):
         # Left branch
         y1 = F.max_pool2d(x, kernel_size=3, stride=self.stride, padding=1)
         if self.stride==2:
@@ -211,7 +211,9 @@ class CellSequential(nn.Sequential):
     """Sequential with inputs from previous blocks."""
     def forward(self, input, prev_input):
         for module in self._modules.values():
-            input, prev_input = module(input, prev_input)
+            out_new = module(input, prev_input)
+            prev_input = input
+            input = out_new
         return input, prev_input
 
 
@@ -256,15 +258,15 @@ class PNASNet(nn.Module):
 
     def forward(self, x):
         prev_out = None
-        out = self.stem(x)
-        out, prev_out = self.layer1(out, prev_out)
-        out, prev_out = self.layer2(out, prev_out)
-        out, prev_out = self.layer3(out, prev_out)
+        out = [self.stem(x)]
+        out += [self.layer1(out[-1], out[-2])]
+        out += [self.layer2(out[-1], out[-2])]
+        out += [self.layer3(out[-1], out[-2])]
         if self.train:
             aux_out = self.aux_head(out)
-        out, prev_out = self.layer4(out, prev_out)
-        out, prev_out = self.layer5(out, prev_out)
-        out = F.avg_pool2d(out, 8)
+        out += [self.layer4(out[-1], out[-2])]
+        out += [self.layer5(out[-1], out[-2])]
+        out = F.avg_pool2d(out[-1], 8)
         out = self.linear(out.view(out.size(0), -1))
         if self.train:
             return out, aux_out
