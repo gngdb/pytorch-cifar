@@ -60,14 +60,28 @@ class CellBase(nn.Module):
     channels and shape before applying transformations. Not really discussed in
     the paper, but present in the code."""
     def __init__(self, prev_in_shape, in_shape, planes, stride=1):
-        super(BaseCell, self).__init__()
+        super(CellBase, self).__init__()
         # assumed that previous layer has just concatenated everything together
         # for this layer to deal with
+        self._make_prev_transform(prev_in_shape, in_shape)
+        # then need standard transformation for current
+        _, c, h, w = in_shape
+        layers = []
+        layers.append(nn.ReLU())
+        layers.append(nn.Conv2d(c, planes, 1))
+        layers.append(nn.BatchNorm2d(planes))
+        self.current_transform = nn.Sequential(*layers)
+
+    def _make_prev_transform(self, prev_in_shape, in_shape):
+        if prev_in_shape is None:
+            self.prev_transform = lambda x: x
+            return None
         _, pc, ph, pw = prev_in_shape
         _, c, h, w = in_shape
         assert ph == pw and h == w
         if ph != h:
             self.prev_transform = FactorizedReduction(prev_in_shape)
+            return None
         elif pc != c:
             # prepare sequential pointwise
             layers = []
@@ -75,15 +89,11 @@ class CellBase(nn.Module):
             layers.append(nn.Conv2d(pc, planes, 1))
             layers.append(nn.BatchNorm2d(planes))
             self.prev_transform = nn.Sequential(*layers)
+            return None
         else:
             # do nothing
             self.prev_transform = lambda x: x
-        # then need standard transformation for current
-        layers = []
-        layers.append(nn.ReLU())
-        layers.append(nn.Conv2d(c, planes, 1))
-        layers.append(nn.BatchNorm2d(planes))
-        self.current_transform = nn.Sequential(*layers)
+            return None
         
     def forward(self, current, prev):
         out_prev = self.prev_transform(prev)
@@ -94,13 +104,17 @@ class CellBase(nn.Module):
 class Cell1(nn.Module):
     def __init__(self, prev_in_shape, in_shape, planes, stride=1):
         super(Cell1, self).__init__()
+        self.base = CellBase(prev_in_shape, in_shape, planes, stride=stride)
         self.stride = stride
+        in_planes = planes # if base has done its job
+        out_planes = planes
         self.sep_conv1 = SepConv(in_planes, out_planes, kernel_size=7, stride=stride)
         if stride==2:
             self.conv1 = nn.Conv2d(in_planes, out_planes, kernel_size=1, stride=1, padding=0, bias=False)
             self.bn1 = nn.BatchNorm2d(out_planes)
 
     def forward(self, x, prev_x):
+        x, prev_x = self.base(x, prev_x)
         y1 = self.sep_conv1(x)
         y2 = F.max_pool2d(x, kernel_size=3, stride=self.stride, padding=1)
         if self.stride==2:
@@ -110,6 +124,7 @@ class Cell1(nn.Module):
 
 class Cell2(nn.Module):
     def __init__(self, in_planes, out_planes, stride=1):
+        assert False
         super(Cell2, self).__init__()
         self.stride = stride
         # Left branch
@@ -142,6 +157,7 @@ class Cell2(nn.Module):
 
 class Cell3(nn.Module):
     def __init__(self, prev_in_shape, in_shape, planes, stride=1):
+        assert False
         super(Cell3, self).__init__()
         self.stride = stride
         # Left branch
@@ -162,7 +178,7 @@ class Cell3(nn.Module):
         # Concat & reduce channels
         b1 = F.relu(y1+y2)
         b2 = F.relu(y3+y4)
-        b3 = 
+        #b3 = 
         y = torch.cat([b1,b2], 1)
         return F.relu(self.bn2(self.conv2(y)))
 
@@ -287,6 +303,7 @@ def test():
     x = Variable(torch.randn(1,3,32,32))
     y = net(x)
     print(y)
+    return None
     net = PNASNet2()
     print(net)
     x = Variable(torch.randn(1,3,32,32))
