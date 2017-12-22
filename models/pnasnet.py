@@ -127,9 +127,11 @@ class Cell1(nn.Module):
 
 
 class Cell2(nn.Module):
-    def __init__(self, in_planes, out_planes, stride=1):
-        assert False
+    def __init__(self, prev_in_shape, in_shape, planes, stride=1):
         super(Cell2, self).__init__()
+        self.base = CellBase(prev_in_shape, in_shape, planes, stride=stride)
+        in_planes = planes # if base has done its job
+        out_planes = planes
         self.stride = stride
         # Left branch
         self.sep_conv1 = SepConv(in_planes, out_planes, kernel_size=7, stride=stride)
@@ -144,6 +146,7 @@ class Cell2(nn.Module):
         self.bn2 = nn.BatchNorm2d(out_planes)
 
     def forward(self, x, prev_x):
+        x, prev_x = self.base(x, prev_x)
         # Left branch
         y1 = self.sep_conv1(x)
         y2 = self.sep_conv2(x)
@@ -317,7 +320,6 @@ def test():
     x = Variable(torch.randn(1,3,32,32))
     y = net(x)
     print(y)
-    return None
     net = PNASNet2()
     print(net)
     x = Variable(torch.randn(1,3,32,32))
