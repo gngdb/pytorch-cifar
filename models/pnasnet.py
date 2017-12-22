@@ -119,11 +119,12 @@ class Cell1(nn.Module):
 
     def forward(self, x, prev_x):
         x, prev_x = self.base(x, prev_x)
+        x, prev_x = F.relu(x), F.relu(prev_x)
         y1 = self.sep_conv1(x)
         y2 = F.max_pool2d(x, kernel_size=3, stride=self.stride, padding=1)
         if self.stride==2:
             y2 = self.bn1(self.conv1(y2))
-        return F.relu(y1+y2)
+        return y1+y2
 
 
 class Cell2(nn.Module):
@@ -147,6 +148,7 @@ class Cell2(nn.Module):
 
     def forward(self, x, prev_x):
         x, prev_x = self.base(x, prev_x)
+        x, prev_x = F.relu(x), F.relu(prev_x)
         # Left branch
         y1 = self.sep_conv1(x)
         y2 = self.sep_conv2(x)
@@ -156,10 +158,10 @@ class Cell2(nn.Module):
             y3 = self.bn1(self.conv1(y3))
         y4 = self.sep_conv3(x)
         # Concat & reduce channels
-        b1 = F.relu(y1+y2)
-        b2 = F.relu(y3+y4)
+        b1 = y1+y2
+        b2 = y3+y4
         y = torch.cat([b1,b2], 1)
-        return F.relu(self.bn2(self.conv2(y)))
+        return self.bn2(self.conv2(y))
 
 
 class Cell3(nn.Module):
@@ -301,7 +303,7 @@ class PNASNet(nn.Module):
         out += [self.reduce2(out[-1], out[-2])]
         _ = out.pop(0)
         out = self.cellseq3(out[-1], out[-2])
-        out = F.avg_pool2d(out[-1], 8)
+        out = F.avg_pool2d(F.relu(out[-1]), 8)
         out = self.linear(out.view(out.size(0), -1))
         if self.train:
             return out, aux_out
