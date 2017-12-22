@@ -37,10 +37,10 @@ class FactorizedReduction(nn.Module):
         # two branches, with avgpool offset in one branch, but not in the other 
         _, c, h, w = prev_in_shape
         self.avgpoolA = nn.AvgPool2d(2)
-        self.pointwiseA = nn.Conv2d(c, planes//2)
+        self.pointwiseA = nn.Conv2d(c, planes//2, 1)
         self.padB = nn.ZeroPad2d((0,1,0,1))
         self.avgpoolB = nn.AvgPool2d(2)
-        self.pointwiseB(c, planes//2)
+        self.pointwiseB = nn.Conv2d(c, planes//2, 1)
         # after concat, batchnorm
         self.bn = nn.BatchNorm2d(planes)
 
@@ -63,7 +63,7 @@ class CellBase(nn.Module):
         super(CellBase, self).__init__()
         # assumed that previous layer has just concatenated everything together
         # for this layer to deal with
-        self._make_prev_transform(prev_in_shape, in_shape)
+        self._make_prev_transform(prev_in_shape, in_shape, planes)
         # then need standard transformation for current
         _, c, h, w = in_shape
         layers = []
@@ -72,7 +72,7 @@ class CellBase(nn.Module):
         layers.append(nn.BatchNorm2d(planes))
         self.current_transform = nn.Sequential(*layers)
 
-    def _make_prev_transform(self, prev_in_shape, in_shape):
+    def _make_prev_transform(self, prev_in_shape, in_shape, planes):
         if prev_in_shape is None:
             self.prev_transform = lambda x: x
             return None
@@ -80,7 +80,7 @@ class CellBase(nn.Module):
         _, c, h, w = in_shape
         assert ph == pw and h == w
         if ph != h:
-            self.prev_transform = FactorizedReduction(prev_in_shape)
+            self.prev_transform = FactorizedReduction(prev_in_shape, planes)
             return None
         elif pc != c:
             # prepare sequential pointwise
@@ -97,7 +97,11 @@ class CellBase(nn.Module):
         
     def forward(self, current, prev):
         out_prev = self.prev_transform(prev)
+        #try:
         out_current = self.current_transform(current)
+        #except RuntimeError:
+        #    import pdb
+        #    pdb.set_trace()
         return out_current, out_prev
     
 
@@ -195,19 +199,20 @@ class CIFARStem(nn.Module):
 
 class AuxHead(nn.Module):
     def __init__(self, qnd_shape_inference, num_classes=10):
+        super(AuxHead, self).__init__()
         # aux output to improve convergence (classification shortcut)
         self.pool = nn.AvgPool2d(5, stride=3)
         # local shape inference
-        qnd_shape_inference = self.pool(qnd_shape_inference)
+        qnd_shape_inference = self.pool(qnd_shape_inference[1])
         in_planes = qnd_shape_inference.size(1)
-        self.pointwise = nn.Conv2D(in_planes, 128, 1)
-        qnd_shape_inference = self.pointwise(self.qnd_shape_inference)
+        self.pointwise = nn.Conv2d(in_planes, 128, 1)
+        qnd_shape_inference = self.pointwise(qnd_shape_inference)
         self.pointwise_bn = nn.BatchNorm2d(128)
         _, c, h, w = qnd_shape_inference.size()
         assert h == w # idk what to do if they aren't
         # PNASNet's way of implementing a fc layer is wild
-        self.conv2d_fc = nn.Conv2D(in_planes, 728, h)
-        self.conv2d_fc_bn = nn.BatchNorm2d(728)
+        self.conv2d_fc = nn.Conv2d(128, 728, h)
+        #self.conv2d_fc_bn = nn.BatchNorm2d(728)
         #qnd_shape_inference = layers[-1](self.qnd_shape_inference)
         #_, c, h, w = qnd_shape_inference.size()
         self.linear = nn.Linear(728, num_classes)
@@ -218,7 +223,7 @@ class AuxHead(nn.Module):
         out = self.pointwise_bn(out)
         out = F.relu(out)
         out = self.conv2d_fc(out)
-        out = self.conv2d_fc_bn(out)
+        #out = self.conv2d_fc_bn(out)
         out = F.relu(out)
         return self.linear(out.view(out.size(0),-1))
 
@@ -230,7 +235,7 @@ class CellSequential(nn.Sequential):
             out_new = module(input, prev_input)
             prev_input = input
             input = out_new
-        return input, prev_input
+        return [input, prev_input]
 
 
 class PNASNet(nn.Module):
@@ -242,46 +247,55 @@ class PNASNet(nn.Module):
 
         # stem
         self.stem = CIFARStem(num_planes*stem_multiplier)
-        self.qnd_shape_inference = self.stem(self.qnd_shape_inference)
+        self.qnd_shape_inference = [None, self.stem(self.qnd_shape_inference)]
 
-        self.layer1 = self._make_layer(num_planes, num_cells=6)
-        self.layer2 = self._downsample(num_planes*2)
-        self.layer3 = self._make_layer(num_planes*2, num_cells=6)
+        self.cellseq1 = self._make_layer(num_planes, num_cells=6)
+        self.reduce1 = self._downsample(num_planes*2)
+        self.cellseq2 = self._make_layer(num_planes*2, num_cells=6)
         self.aux_head  = AuxHead(self.qnd_shape_inference)
-        self.layer4 = self._downsample(num_planes*4)
-        self.layer5 = self._make_layer(num_planes*4, num_cells=6)
+        self.reduce2 = self._downsample(num_planes*4)
+        self.cellseq3 = self._make_layer(num_planes*4, num_cells=6)
 
         self.linear = nn.Linear(num_planes*4, 10)
 
         # re-initialise weights (batchnorm parameters could get broken by qnd shape inference
-        assert False
+        for m in self.modules():
+            if isinstance(m, nn.BatchNorm2d):
+                m.weight.data.fill_(1)
+                m.bias.data.zero_()
 
     def _make_layer(self, planes, num_cells):
         layers = []
         prev_in_shape = None
         for _ in range(num_cells):
-            in_shape = self.qnd_shape_inference.size()
+            in_shape = self.qnd_shape_inference[1].size()
+            prev_in_shape = self.qnd_shape_inference[0].size() if self.qnd_shape_inference[0] is not None else None
             layers.append(self.cell_type(prev_in_shape, in_shape, planes, stride=1))
-            self.qnd_shape_inference = layers[-1](self.qnd_shape_inference)
-            prev_in_shape = in_shape
-            print(prev_in_shape, in_shape)
+            _qnd = layers[-1](self.qnd_shape_inference[1], self.qnd_shape_inference[0])
+            self.qnd_shape_inference.append(_qnd)
+            _ = self.qnd_shape_inference.pop(0)
         return CellSequential(*layers)
 
     def _downsample(self, planes):
-        in_shape = self.qnd_shape_inference.size()
-        layer = self.cell_type(in_shape, planes, stride=2)
+        prev_in_shape = self.qnd_shape_inference[0].size()
+        in_shape = self.qnd_shape_inference[1].size()
+        layer = self.cell_type(prev_in_shape, in_shape, planes, stride=2)
+        _qnd = layer(self.qnd_shape_inference[1], self.qnd_shape_inference[0])
+        self.qnd_shape_inference.append(_qnd)
+        _ = self.qnd_shape_inference.pop(0)
         return layer
 
     def forward(self, x):
-        prev_out = None
-        out = [self.stem(x)]
-        out += [self.layer1(out[-1], out[-2])]
-        out += [self.layer2(out[-1], out[-2])]
-        out += [self.layer3(out[-1], out[-2])]
+        out = [None, self.stem(x)]
+        out = self.cellseq1(out[-1], out[-2])
+        out += [self.reduce1(out[-1], out[-2])]
+        _ = out.pop(0)
+        out = self.cellseq2(out[-1], out[-2])
         if self.train:
-            aux_out = self.aux_head(out)
-        out += [self.layer4(out[-1], out[-2])]
-        out += [self.layer5(out[-1], out[-2])]
+            aux_out = self.aux_head(out[-1])
+        out += [self.reduce2(out[-1], out[-2])]
+        _ = out.pop(0)
+        out = self.cellseq3(out[-1], out[-2])
         out = F.avg_pool2d(out[-1], 8)
         out = self.linear(out.view(out.size(0), -1))
         if self.train:
@@ -299,7 +313,7 @@ def PNASNet2():
 
 def test():
     net = PNASNet1()
-    print(net)
+    #print(net)
     x = Variable(torch.randn(1,3,32,32))
     y = net(x)
     print(y)
