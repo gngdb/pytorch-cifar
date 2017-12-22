@@ -1,6 +1,14 @@
 '''PNASNet in PyTorch.
 
 Paper: Progressive Neural Architecture Search
+
+Note: could not figure out from the slim code what is supposed to happen in
+e.g. Cell 3 when an identity transform is added to a convolution, if the
+convolution is stride 2. They are obviously going to be the wrong shape and
+impossible to cast onto each other. In those cases, I've decided to use the
+Factorized Reduction in their code.
+
+There are probably other mistakes of this type, which may or may not matter.
 '''
 import torch
 import torch.nn as nn
@@ -32,10 +40,10 @@ class FactorizedReduction(nn.Module):
     Hack to ensure input from previous block is always the same shape as the
     input from the current block.
     """
-    def __init__(self, prev_in_shape, planes):
+    def __init__(self, prev_in_planes, planes):
         super(FactorizedReduction, self).__init__()
         # two branches, with avgpool offset in one branch, but not in the other 
-        _, c, h, w = prev_in_shape
+        c = prev_in_planes
         self.avgpoolA = nn.AvgPool2d(2)
         self.pointwiseA = nn.Conv2d(c, planes//2, 1)
         self.padB = nn.ZeroPad2d((0,1,0,1))
@@ -80,9 +88,9 @@ class CellBase(nn.Module):
         _, c, h, w = in_shape
         assert ph == pw and h == w
         if ph != h:
-            self.prev_transform = FactorizedReduction(prev_in_shape, planes)
+            self.prev_transform = FactorizedReduction(pc, planes)
             return None
-        elif pc != c:
+        elif pc != planes:
             # prepare sequential pointwise
             layers = []
             layers.append(nn.ReLU())
@@ -96,12 +104,14 @@ class CellBase(nn.Module):
             return None
         
     def forward(self, current, prev):
+        prev_ch = prev.size(1) if prev is not None else -1
         out_prev = self.prev_transform(prev)
-        #try:
+        out_ch = current.size(1)
         out_current = self.current_transform(current)
-        #except RuntimeError:
-        #    import pdb
-        #    pdb.set_trace()
+        if out_prev is not None:
+            if out_prev.size(1) == prev_ch and not out_current.size(1) == out_ch:
+                import pdb
+                pdb.set_trace()
         return out_current, out_prev
     
 
@@ -119,7 +129,7 @@ class Cell1(nn.Module):
 
     def forward(self, x, prev_x):
         x, prev_x = self.base(x, prev_x)
-        x, prev_x = F.relu(x), F.relu(prev_x)
+        x, prev_x = F.relu(x), F.relu(prev_x) if prev_x is not None else prev_x
         y1 = self.sep_conv1(x)
         y2 = F.max_pool2d(x, kernel_size=3, stride=self.stride, padding=1)
         if self.stride==2:
@@ -148,7 +158,7 @@ class Cell2(nn.Module):
 
     def forward(self, x, prev_x):
         x, prev_x = self.base(x, prev_x)
-        x, prev_x = F.relu(x), F.relu(prev_x)
+        x, prev_x = F.relu(x), F.relu(prev_x) if prev_x is not None else prev_x
         # Left branch
         y1 = self.sep_conv1(x)
         y2 = self.sep_conv2(x)
@@ -175,23 +185,33 @@ class Cell3(nn.Module):
         self.sep_conv1 = SepConv(in_planes, out_planes, kernel_size=5, stride=stride)
         # Middle branch
         self.sep_conv2 = SepConv(in_planes, out_planes, kernel_size=3, stride=stride)
+        if self.stride == 2:
+            self.reduction = FactorizedReduction(in_planes, out_planes)
         # Right branch
-        self.conv_1b7 = nn.Conv2d(in_planes, out_planes, kernel_size=(1,7), stride=stride, padding=(1,3))
-        self.conv_7b1 = nn.Conv2d(in_planes, out_planes, kernel_size=(7,1), stride=stride, padding=(3,1))
+        self.conv_1b7 = nn.Conv2d(in_planes, out_planes, kernel_size=(1,7), stride=(1,stride), padding=(0,3))
+        self.conv_7b1 = nn.Conv2d(in_planes, out_planes, kernel_size=(7,1), stride=(stride,1), padding=(3,0))
 
     def forward(self, x, prev_x):
+        x, prev_x = self.base(x, prev_x)
+        x, prev_x = F.relu(x), F.relu(prev_x) if prev_x is not None else prev_x
         # Left branch
         y1 = F.max_pool2d(x, kernel_size=3, stride=self.stride, padding=1)
         y2 = self.sep_conv1(x)
         branchA = y1+y2
         # Middle branch
-        branchB = self.sep_conv2(x)+x
+        if self.stride == 2:
+            branchB = self.sep_conv2(x) + self.reduction(x)
+        else:
+            branchB = self.sep_conv2(x) + x
         # Right branch
-        y3 = self.conv_1b7(prev_x)
-        y3 = self.conv_7b1(y3)
-        y4 = F.max_pool2d(x, kernel_size=3, stride=self.stride, padding=1)
-        branchC = y3+y4
-        return torch.cat([branchA, branchB, branchC], 1)
+        if prev_x is not None:
+            y3 = self.conv_1b7(prev_x)
+            y3 = self.conv_7b1(y3)
+            y4 = F.max_pool2d(x, kernel_size=3, stride=self.stride, padding=1)
+            branchC = [y3+y4]
+        else:
+            branchC = [] 
+        return torch.cat([branchA, branchB]+branchC, 1)
 
 
 class CIFARStem(nn.Module):
@@ -263,6 +283,10 @@ class PNASNet(nn.Module):
         self.reduce2 = self._downsample(num_planes*4)
         self.cellseq3 = self._make_layer(num_planes*4, num_cells=6)
 
+        if self.qnd_shape_inference[1].size(1) != num_planes*4:
+            prev_in_shape = self.qnd_shape_inference[0].size()
+            in_shape = self.qnd_shape_inference[1].size()
+            self.linear_base = CellBase(prev_in_shape, in_shape, num_planes*4)
         self.linear = nn.Linear(num_planes*4, 10)
 
         # re-initialise weights (batchnorm parameters could get broken by qnd shape inference
@@ -303,7 +327,11 @@ class PNASNet(nn.Module):
         out += [self.reduce2(out[-1], out[-2])]
         _ = out.pop(0)
         out = self.cellseq3(out[-1], out[-2])
-        out = F.avg_pool2d(F.relu(out[-1]), 8)
+        if hasattr(self, 'linear_base'):
+            out, _ = self.linear_base(out[-1], out[-2])
+        else:
+            out = out[-1]
+        out = F.avg_pool2d(F.relu(out), 8)
         out = self.linear(out.view(out.size(0), -1))
         if self.train:
             return out, aux_out
@@ -312,10 +340,13 @@ class PNASNet(nn.Module):
 
 
 def PNASNet1():
-    return PNASNet(Cell1, num_cells=6, num_planes=44)
+    return PNASNet(Cell1, num_cells=6, num_planes=32)
 
 def PNASNet2():
     return PNASNet(Cell2, num_cells=6, num_planes=32)
+
+def PNASNet3():
+    return PNASNet(Cell3, num_cells=6, num_planes=32)
 
 
 def test():
@@ -325,10 +356,14 @@ def test():
     y = net(x)
     print(y)
     net = PNASNet2()
-    print(net)
     x = Variable(torch.randn(1,3,32,32))
     y = net(x)
     print(y)
+    net = PNASNet3()
+    x = Variable(torch.randn(1,3,32,32))
+    y = net(x)
+    print(y)
+
 
 if __name__ == '__main__':
     test()
