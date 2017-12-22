@@ -164,30 +164,32 @@ class Cell2(nn.Module):
 
 class Cell3(nn.Module):
     def __init__(self, prev_in_shape, in_shape, planes, stride=1):
-        assert False
         super(Cell3, self).__init__()
+        self.base = CellBase(prev_in_shape, in_shape, planes, stride=stride)
+        in_planes = planes # if base has done its job
+        out_planes = planes
         self.stride = stride
         # Left branch
         self.sep_conv1 = SepConv(in_planes, out_planes, kernel_size=5, stride=stride)
-        if stride==2:
-            self.conv1 = nn.Conv2d(in_planes, out_planes, kernel_size=1, stride=1, padding=0, bias=False)
-            self.bn1 = nn.BatchNorm2d(out_planes)
-        # Reduce channels
-        self.conv2 = nn.Conv2d(2*out_planes, out_planes, kernel_size=1, stride=1, padding=0, bias=False)
-        self.bn2 = nn.BatchNorm2d(out_planes)
+        # Middle branch
+        self.sep_conv2 = SepConv(in_planes, out_planes, kernel_size=3, stride=stride)
+        # Right branch
+        self.conv_1b7 = nn.Conv2d(in_planes, out_planes, kernel_size=(1,7), stride=stride, padding=(1,3))
+        self.conv_7b1 = nn.Conv2d(in_planes, out_planes, kernel_size=(7,1), stride=stride, padding=(3,1))
 
     def forward(self, x, prev_x):
         # Left branch
         y1 = F.max_pool2d(x, kernel_size=3, stride=self.stride, padding=1)
-        if self.stride==2:
-            y1 = self.bn1(self.conv1(y1))
         y2 = self.sep_conv1(x)
-        # Concat & reduce channels
-        b1 = F.relu(y1+y2)
-        b2 = F.relu(y3+y4)
-        #b3 = 
-        y = torch.cat([b1,b2], 1)
-        return F.relu(self.bn2(self.conv2(y)))
+        branchA = y1+y2
+        # Middle branch
+        branchB = self.sep_conv2(x)+x
+        # Right branch
+        y3 = self.conv_1b7(prev_x)
+        y3 = self.conv_7b1(y3)
+        y4 = F.max_pool2d(x, kernel_size=3, stride=self.stride, padding=1)
+        branchC = y3+y4
+        return torch.cat([branchA, branchB, branchC], 1)
 
 
 class CIFARStem(nn.Module):
