@@ -8,6 +8,11 @@ convolution is stride 2. They are obviously going to be the wrong shape and
 impossible to cast onto each other. In those cases, I've decided to use the
 Factorized Reduction in their code.
 
+Looks like in the original code, paths are dropped potentially whenever a 
+convolution is performed. I've limited it to just wherever there is a branch
+in a Cell and made them all explicit, just to make things easier to keep 
+track of.
+
 There are probably other mistakes of this type, which may or may not matter.
 '''
 import torch
@@ -63,6 +68,36 @@ class FactorizedReduction(nn.Module):
         return self.bn(out)
 
 
+class DropPath(nn.Module):
+    """
+    Zeros input x with probability 1-p independently over examples.
+    p is the probability of keeping the input, the opposite of the normal
+    operation of the Dropout module.
+    """
+
+    def __init__(self, p=0.5, inplace=False):
+        super(DropPath, self).__init__()
+        if p < 0 or p > 1:
+            raise ValueError("dropout probability has to be between 0 and 1, "
+                             "but got {}".format(p))
+        self.keep_prob, self.p = p, 1.-p
+        self.inplace = inplace
+
+    def forward(self, input):
+        if not self.training:
+            return input
+        batch_size = input.size(0)
+        mask = torch.ones(batch_size, 1, 1, 1)
+        mask = F.dropout(mask, self.p, self.training, self.inplace)
+        return mask*input
+
+    def __repr__(self):
+        inplace_str = ', inplace' if self.inplace else ''
+        return self.__class__.__name__ + '(' \
+            + 'p=' + str(self.p) \
+            + inplace_str + ')'
+
+
 class CellBase(nn.Module):
     """Implements base transformations to ensure uniform number of
     channels and shape before applying transformations. Not really discussed in
@@ -116,7 +151,7 @@ class CellBase(nn.Module):
     
 
 class Cell1(nn.Module):
-    def __init__(self, prev_in_shape, in_shape, planes, stride=1):
+    def __init__(self, prev_in_shape, in_shape, planes, stride=1, keep_prob=1.0):
         super(Cell1, self).__init__()
         self.base = CellBase(prev_in_shape, in_shape, planes, stride=stride)
         self.stride = stride
@@ -126,6 +161,7 @@ class Cell1(nn.Module):
         if stride==2:
             self.conv1 = nn.Conv2d(in_planes, out_planes, kernel_size=1, stride=1, padding=0, bias=False)
             self.bn1 = nn.BatchNorm2d(out_planes)
+        self.drop_path = DropPath(p=keep_prob)
 
     def forward(self, x, prev_x):
         x, prev_x = self.base(x, prev_x)
@@ -134,11 +170,13 @@ class Cell1(nn.Module):
         y2 = F.max_pool2d(x, kernel_size=3, stride=self.stride, padding=1)
         if self.stride==2:
             y2 = self.bn1(self.conv1(y2))
+        if self.drop_path.keep_prob < 1.0:
+            y1, y2 = self.drop_path(y1), self.drop_path(y2)
         return y1+y2
 
 
 class Cell2(nn.Module):
-    def __init__(self, prev_in_shape, in_shape, planes, stride=1):
+    def __init__(self, prev_in_shape, in_shape, planes, stride=1, keep_prob=1.0):
         super(Cell2, self).__init__()
         self.base = CellBase(prev_in_shape, in_shape, planes, stride=stride)
         in_planes = planes # if base has done its job
@@ -155,6 +193,8 @@ class Cell2(nn.Module):
         # Reduce channels
         self.conv2 = nn.Conv2d(2*out_planes, out_planes, kernel_size=1, stride=1, padding=0, bias=False)
         self.bn2 = nn.BatchNorm2d(out_planes)
+        # Drop path
+        self.drop_path = DropPath(p=keep_prob)
 
     def forward(self, x, prev_x):
         x, prev_x = self.base(x, prev_x)
@@ -167,6 +207,9 @@ class Cell2(nn.Module):
         if self.stride==2:
             y3 = self.bn1(self.conv1(y3))
         y4 = self.sep_conv3(x)
+        # Drop paths
+        if self.drop_path.keep_prob < 1.0:
+            y1, y2, y3, y4 = [self.drop_path(y) for y in [y1,y2,y3,y4]]
         # Concat & reduce channels
         b1 = y1+y2
         b2 = y3+y4
@@ -175,7 +218,7 @@ class Cell2(nn.Module):
 
 
 class Cell3(nn.Module):
-    def __init__(self, prev_in_shape, in_shape, planes, stride=1):
+    def __init__(self, prev_in_shape, in_shape, planes, stride=1, keep_prob=1.0):
         super(Cell3, self).__init__()
         self.base = CellBase(prev_in_shape, in_shape, planes, stride=stride)
         in_planes = planes # if base has done its job
@@ -190,6 +233,8 @@ class Cell3(nn.Module):
         # Right branch
         self.conv_1b7 = nn.Conv2d(in_planes, out_planes, kernel_size=(1,7), stride=(1,stride), padding=(0,3))
         self.conv_7b1 = nn.Conv2d(in_planes, out_planes, kernel_size=(7,1), stride=(stride,1), padding=(3,0))
+        # Drop path
+        self.drop_path = DropPath(p=keep_prob)
 
     def forward(self, x, prev_x):
         x, prev_x = self.base(x, prev_x)
@@ -200,15 +245,23 @@ class Cell3(nn.Module):
         branchA = y1+y2
         # Middle branch
         if self.stride == 2:
-            branchB = self.sep_conv2(x) + self.reduction(x)
+            y3 = self.sep_conv2(x) 
+            y4 = self.reduction(x)
         else:
-            branchB = self.sep_conv2(x) + x
+            y3 = self.sep_conv2(x)
+            y4 = x
+        if self.drop_path.keep_prob < 1.0:
+            y3, y4 = self.drop_path(y3), self.drop_path(y4)
+        branchB = y3 + y4
         # Right branch
         if prev_x is not None:
-            y3 = self.conv_1b7(prev_x)
-            y3 = self.conv_7b1(y3)
-            y4 = F.max_pool2d(x, kernel_size=3, stride=self.stride, padding=1)
-            branchC = [y3+y4]
+            y5 = self.conv_1b7(prev_x)
+            y5 = self.conv_7b1(y5)
+            y6 = F.max_pool2d(x, kernel_size=3, stride=self.stride, padding=1)
+            # Drop paths
+            if self.drop_path.keep_prob < 1.0:
+                y5, y6 = self.drop_path(y5), self.drop_path(y6)
+            branchC = [y5+y6]
         else:
             branchC = [] 
         return torch.cat([branchA, branchB]+branchC, 1)
@@ -266,11 +319,13 @@ class CellSequential(nn.Sequential):
 
 
 class PNASNet(nn.Module):
-    def __init__(self, cell_type, num_cells, num_planes, stem_multiplier=3):
+    def __init__(self, cell_type, num_cells, num_planes, stem_multiplier=3,
+            drop_path_keep_prob=0.6):
         super(PNASNet, self).__init__()
         # quick and dirty shape inference
         self.qnd_shape_inference = Variable(torch.randn(1,3,32,32))
         self.cell_type = cell_type
+        self.keep_prob = drop_path_keep_prob
 
         # stem
         self.stem = CIFARStem(num_planes*stem_multiplier)
@@ -301,7 +356,7 @@ class PNASNet(nn.Module):
         for _ in range(num_cells):
             in_shape = self.qnd_shape_inference[1].size()
             prev_in_shape = self.qnd_shape_inference[0].size() if self.qnd_shape_inference[0] is not None else None
-            layers.append(self.cell_type(prev_in_shape, in_shape, planes, stride=1))
+            layers.append(self.cell_type(prev_in_shape, in_shape, planes, stride=1, keep_prob=self.keep_prob))
             _qnd = layers[-1](self.qnd_shape_inference[1], self.qnd_shape_inference[0])
             self.qnd_shape_inference.append(_qnd)
             _ = self.qnd_shape_inference.pop(0)
@@ -310,7 +365,7 @@ class PNASNet(nn.Module):
     def _downsample(self, planes):
         prev_in_shape = self.qnd_shape_inference[0].size()
         in_shape = self.qnd_shape_inference[1].size()
-        layer = self.cell_type(prev_in_shape, in_shape, planes, stride=2)
+        layer = self.cell_type(prev_in_shape, in_shape, planes, stride=2, keep_prob=self.keep_prob)
         _qnd = layer(self.qnd_shape_inference[1], self.qnd_shape_inference[0])
         self.qnd_shape_inference.append(_qnd)
         _ = self.qnd_shape_inference.pop(0)
@@ -351,6 +406,7 @@ def PNASNet3():
 
 def test():
     net = PNASNet1()
+    net.train()
     #print(net)
     x = Variable(torch.randn(1,3,32,32))
     y = net(x)
