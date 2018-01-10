@@ -283,6 +283,8 @@ class Cell4(nn.Module):
         self.sep_conv3 = SepConv(in_planes, out_planes, kernel_size=3, stride=stride)
         # Branch 3
         self.sep_conv4 = SepConv(in_planes, out_planes, kernel_size=3, stride=stride)       
+        if stride == 2:
+            self.reduction = FactorizedReduction(in_planes, out_planes)
         # Branch 4
         self.sep_conv5 = SepConv(in_planes, out_planes, kernel_size=5, stride=stride)
         # Drop path
@@ -308,7 +310,11 @@ class Cell4(nn.Module):
             y5 = self.sep_conv4(prev_x)
             if self.drop_path.keep_prob < 1.0 and self.training:
                 y5 = self.drop_path(y5)
-            branches.append(y5 + x)
+            if self.stride == 2: # identity won't map without doing this
+                identity = self.reduction(x) # despite this not really being identity
+            else:
+                identity = x
+            branches.append(y5 + identity)
             # Branch 4
             y6 = self.sep_conv5(prev_x)
             if self.drop_path.keep_prob < 1.0 and self.training:
@@ -456,6 +462,9 @@ def PNASNet2():
 def PNASNet3():
     return PNASNet(Cell3, num_cells=6, num_planes=32)
 
+def PNASNet4():
+    return PNASNet(Cell4, num_cells=6, num_planes=32)
+
 
 def test():
     net = PNASNet1()
@@ -465,11 +474,12 @@ def test():
     y = net(x)
     print(y)
     net = PNASNet2()
-    x = Variable(torch.randn(1,3,32,32))
     y = net(x)
     print(y)
     net = PNASNet3()
-    x = Variable(torch.randn(1,3,32,32))
+    y = net(x)
+    print(y)
+    net = PNASNet4()
     y = net(x)
     print(y)
 
