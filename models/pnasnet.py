@@ -13,6 +13,13 @@ convolution is performed. I've limited it to just wherever there is a branch
 in a Cell and made them all explicit, just to make things easier to keep 
 track of.
 
+In Cell 5 there is a chain of two convolutional blocks. If I naively used
+stride=2 with both in reduce blocks the size of the output could never cast
+onto the output of the parallel branch. So, I thought it was probably best to
+just not apply stride 2 in the second convolution. I don't know what is done in
+this case in the original model (it is difficult to figure it out from reading
+the code).
+
 There are probably other mistakes of this type, which may or may not matter.
 '''
 import torch
@@ -326,6 +333,72 @@ class Cell4(nn.Module):
         return torch.cat(branches, 1)
 
 
+class Cell5(nn.Module):
+    def __init__(self, prev_in_shape, in_shape, planes, stride=1, keep_prob=1.0):
+        super(Cell5, self).__init__()
+        self.base = CellBase(prev_in_shape, in_shape, planes, stride=stride)
+        in_planes = planes # if base has done its job
+        out_planes = planes
+        self.stride = stride
+        # This structure is a little nested, but branches are still numbered left to right
+        # Branch 1
+        self.sep_conv1 = SepConv(in_planes, out_planes, kernel_size=7, stride=stride)
+        # Branch 2
+        self.sep_conv2 = SepConv(in_planes, out_planes, kernel_size=5, stride=stride)
+        self.sep_conv3 = SepConv(in_planes, out_planes, kernel_size=3, stride=stride)
+        # Branch 3
+        self.sep_conv4 = SepConv(in_planes, out_planes, kernel_size=3, stride=1) # see notes at top
+        # Branch 4
+        self.sep_conv5 = SepConv(in_planes, out_planes, kernel_size=3, stride=stride)
+        if stride == 2:
+            self.reduction = FactorizedReduction(in_planes, out_planes)
+        # Branch 5
+        self.sep_conv6 = SepConv(in_planes, out_planes, kernel_size=5, stride=stride)
+        # Drop path
+        self.drop_path = DropPath(p=keep_prob)
+
+    def forward(self, x, prev_x):
+        x, prev_x = self.base(x, prev_x)
+        x, prev_x = F.relu(x), F.relu(prev_x) if prev_x is not None else prev_x
+        # Branch 1
+        y1 = self.sep_conv1(x)
+        y2 = F.max_pool2d(x, kernel_size=3, stride=self.stride, padding=1)
+        if self.drop_path.keep_prob < 1.0 and self.training:
+            y1, y2 = self.drop_path(y1), self.drop_path(y2)
+        branches = [y1 + y2]
+        # Branch 2
+        y3 = self.sep_conv2(x)
+        y4 = self.sep_conv3(x)
+        if self.drop_path.keep_prob < 1.0 and self.training:
+            y3, y4 = self.drop_path(y3), self.drop_path(y4)
+        b2 = y3 + y4
+        # Branch 3
+        y5 = self.sep_conv4(b2)
+        y6 = F.max_pool2d(x, kernel_size=3, stride=self.stride, padding=1)
+        if self.drop_path.keep_prob < 1.0 and self.training:
+            y5, y6 = self.drop_path(y5), self.drop_path(y6)
+        branches.append(y5+y6)
+        # Branch 4 
+        if prev_x is not None:
+            y7 = self.sep_conv5(prev_x)
+            if self.drop_path.keep_prob < 1.0 and self.training:
+                y7 = self.drop_path(y7)
+            if self.stride == 2: # identity won't map without doing this
+                identity = self.reduction(x) # despite this not really being identity
+            else:
+                identity = x
+            branches.append(y7 + identity)
+            # Branch 4
+            y8 = self.sep_conv6(prev_x)
+            if self.drop_path.keep_prob < 1.0 and self.training:
+                y8 = self.drop_path(y8)
+            y9 = F.max_pool2d(prev_x, kernel_size=3, stride=self.stride, padding=1)
+            branches.append(y8+y9)
+        else:
+            branches.append(x)
+        return torch.cat(branches, 1)
+
+
 class CIFARStem(nn.Module):
     def __init__(self, num_planes):
         super(CIFARStem, self).__init__()
@@ -465,6 +538,9 @@ def PNASNet3():
 def PNASNet4():
     return PNASNet(Cell4, num_cells=6, num_planes=32)
 
+def PNASNet5():
+    return PNASNet(Cell5, num_cells=6, num_planes=32)
+
 
 def test():
     net = PNASNet1()
@@ -480,6 +556,9 @@ def test():
     y = net(x)
     print(y)
     net = PNASNet4()
+    y = net(x)
+    print(y)
+    net = PNASNet5()
     y = net(x)
     print(y)
 
