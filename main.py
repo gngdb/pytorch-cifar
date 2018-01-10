@@ -1,4 +1,5 @@
 '''Train CIFAR10 with PyTorch.'''
+
 from __future__ import print_function
 
 import torch
@@ -12,6 +13,7 @@ import torchvision.transforms as transforms
 
 import os
 import argparse
+import math
 
 from models import *
 from utils import progress_bar
@@ -62,7 +64,7 @@ else:
     print('==> Building model..')
     # net = VGG('VGG19')
     # net = ResNet18()
-    net = PreActResNet18()
+    # net = PreActResNet18()
     # net = GoogLeNet()
     # net = DenseNet121()
     # net = ResNeXt29_2x64d()
@@ -70,6 +72,7 @@ else:
     # net = DPN92()
     # net = ShuffleNetG2()
     # net = SENet18()
+    net = PNASNet1()
 
 if use_cuda:
     net.cuda()
@@ -79,23 +82,43 @@ if use_cuda:
 criterion = nn.CrossEntropyLoss()
 optimizer = optim.SGD(net.parameters(), lr=args.lr, momentum=0.9, weight_decay=5e-4)
 
+global_idx = 0
+
+def cosine(idx):
+    radians = math.pi*(float(idx)/200.)
+    return 0.5*(1.0 + math.cos(radians))
+
+def set_optimizer_lr(optimizer, lr):
+    # callback to set the learning rate in an optimizer, without rebuilding the whole optimizer
+    for param_group in optimizer.param_groups:
+        param_group['lr'] = lr
+
 # Training
 def train(epoch):
+    global global_idx
     print('\nEpoch: %d' % epoch)
     net.train()
     train_loss = 0
     correct = 0
     total = 0
     for batch_idx, (inputs, targets) in enumerate(trainloader):
+        set_optimizer_lr(optimizer, args.lr*cosine(global_idx))
         if use_cuda:
             inputs, targets = inputs.cuda(), targets.cuda()
         optimizer.zero_grad()
         inputs, targets = Variable(inputs), Variable(targets)
         outputs = net(inputs)
-        loss = criterion(outputs, targets)
+        if isinstance(net.module, PNASNet):
+            outputs, aux_outputs = outputs[0], outputs[1]
+            aux_loss = criterion(aux_outputs, targets)
+        else:
+            aux_loss = 0.0
+        loss = criterion(outputs, targets) + aux_loss
         loss.backward()
         optimizer.step()
 
+        global_idx += 1
+        
         train_loss += loss.data[0]
         _, predicted = torch.max(outputs.data, 1)
         total += targets.size(0)

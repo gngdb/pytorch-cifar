@@ -124,9 +124,12 @@ class CellBase(nn.Module):
         layers.append(nn.BatchNorm2d(planes))
         self.current_transform = nn.Sequential(*layers)
 
+    def do_nothing(self, x):
+        return x
+
     def _make_prev_transform(self, prev_in_shape, in_shape, planes):
         if prev_in_shape is None:
-            self.prev_transform = lambda x: x
+            self.prev_transform = self.do_nothing
             return None
         _, pc, ph, pw = prev_in_shape
         _, c, h, w = in_shape
@@ -144,7 +147,7 @@ class CellBase(nn.Module):
             return None
         else:
             # do nothing
-            self.prev_transform = lambda x: x
+            self.prev_transform = self.do_nothing
             return None
         
     def forward(self, current, prev):
@@ -520,7 +523,7 @@ class PNASNet(nn.Module):
             out = out[-1]
         out = F.avg_pool2d(F.relu(out), 8)
         out = self.linear(out.view(out.size(0), -1))
-        if self.train:
+        if self.training:
             return out, aux_out
         else:
             return out # at test time don't care about aux head
