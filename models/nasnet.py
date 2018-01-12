@@ -169,9 +169,9 @@ class BranchSeparablesReduction(BranchSeparables):
 
 class CellStem0(nn.Module):
 
-    def __init__(self, stem_multiplier):
+    def __init__(self, num_conv_filters, stem_multiplier):
         super(CellStem0, self).__init__()
-        nf1, nf2 = 32*stem_multiplier, 14*stem_multiplier
+        nf1, nf2 = 32*stem_multiplier, num_conv_filters//4
         self.conv_1x1 = nn.Sequential()
         self.conv_1x1.add_module('relu', nn.ReLU())
         self.conv_1x1.add_module('conv', nn.Conv2d(nf1, nf2, 1, stride=1, bias=False))
@@ -219,23 +219,23 @@ class CellStem0(nn.Module):
 
 class CellStem1(nn.Module):
 
-    def __init__(self, stem_multiplier):
+    def __init__(self, num_conv_filters, stem_multiplier):
         super(CellStem1, self).__init__()
         self.conv_1x1 = nn.Sequential()
         self.conv_1x1.add_module('relu', nn.ReLU())
-        self.conv_1x1.add_module('conv', nn.Conv2d(56*stem_multiplier, 28*stem_multiplier, 1, stride=1, bias=False))
-        self.conv_1x1.add_module('bn', nn.BatchNorm2d(28*stem_multiplier, eps=0.001, momentum=0.1, affine=True))
+        self.conv_1x1.add_module('conv', nn.Conv2d(num_conv_filters, num_conv_filters//2, 1, stride=1, bias=False))
+        self.conv_1x1.add_module('bn', nn.BatchNorm2d(num_conv_filters//2, eps=0.001, momentum=0.1, affine=True))
 
         self.relu = nn.ReLU()
         self.path_1 = nn.Sequential()
         self.path_1.add_module('avgpool', nn.AvgPool2d(1, stride=2, count_include_pad=False))
-        self.path_1.add_module('conv', nn.Conv2d(32*stem_multiplier, 14*stem_multiplier, 1, stride=1, bias=False))
+        self.path_1.add_module('conv', nn.Conv2d(32*stem_multiplier, num_conv_filters//4, 1, stride=1, bias=False))
         self.path_2 = nn.ModuleList()
         self.path_2.add_module('pad', nn.ZeroPad2d((0, 1, 0, 1)))
         self.path_2.add_module('avgpool', nn.AvgPool2d(1, stride=2, count_include_pad=False))
-        self.path_2.add_module('conv', nn.Conv2d(32*stem_multiplier, 14*stem_multiplier, 1, stride=1, bias=False))
+        self.path_2.add_module('conv', nn.Conv2d(32*stem_multiplier, num_conv_filters//4, 1, stride=1, bias=False))
 
-        nf = 28*stem_multiplier
+        nf = num_conv_filters//2
         self.final_path_bn = nn.BatchNorm2d(nf, eps=0.001, momentum=0.1, affine=True)
 
         self.comb_iter_0_left = BranchSeparables(nf, nf, 5, 2, 2, bias=False)
@@ -526,6 +526,7 @@ class NASNet(nn.Module):
     def __init__(self, num_conv_filters, filter_scaling_rate, num_classes, num_cells, stem_multiplier):
         super(NASNet, self).__init__()
         self.num_classes = num_classes
+        self.num_cells = num_cells
         
         stem_filters = 32*stem_multiplier
         self.conv0 = nn.Sequential()
@@ -533,8 +534,8 @@ class NASNet(nn.Module):
                                                 bias=False))
         self.conv0.add_module('bn', nn.BatchNorm2d(stem_filters, eps=0.001, momentum=0.1, affine=True))
 
-        self.cell_stem_0 = CellStem0(stem_multiplier)
-        self.cell_stem_1 = CellStem1(stem_multiplier)
+        self.cell_stem_0 = CellStem0(num_conv_filters, stem_multiplier)
+        self.cell_stem_1 = CellStem1(num_conv_filters, stem_multiplier)
 
         self.block1 = []
         nf, fs = num_conv_filters, filter_scaling_rate
@@ -598,31 +599,33 @@ class NASNet(nn.Module):
         x_stem_0 = self.cell_stem_0(x_conv0)
         x_stem_1 = self.cell_stem_1(x_conv0, x_stem_0)
 
-        x_cell_0 = self.cell_0(x_stem_1, x_stem_0)
-        x_cell_1 = self.cell_1(x_cell_0, x_stem_1)
-        x_cell_2 = self.cell_2(x_cell_1, x_cell_0)
-        x_cell_3 = self.cell_3(x_cell_2, x_cell_1)
-        x_cell_4 = self.cell_4(x_cell_3, x_cell_2)
-        x_cell_5 = self.cell_5(x_cell_4, x_cell_3)
+        cell_stack = [x_stem_1, x_stem_0]
+        cell_idx = 0
+        for i in range(self.num_cells//3):
+            next_cell = getattr(self, "cell_%i"%cell_idx)
+            next_out = next_cell(*cell_stack[:2])
+            cell_stack = [next_out] + cell_stack
+            cell_idx += 1
 
-        x_reduction_cell_0 = self.reduction_cell_0(x_cell_5, x_cell_4)
+        x_reduction_cell_0 = self.reduction_cell_0(*cell_stack[:2])
+        cell_stack = [x_reduction_cell_0] + cell_stack
 
-        x_cell_6 = self.cell_6(x_reduction_cell_0, x_cell_4)
-        x_cell_7 = self.cell_7(x_cell_6, x_reduction_cell_0)
-        x_cell_8 = self.cell_8(x_cell_7, x_cell_6)
-        x_cell_9 = self.cell_9(x_cell_8, x_cell_7)
-        x_cell_10 = self.cell_10(x_cell_9, x_cell_8)
-        x_cell_11 = self.cell_11(x_cell_10, x_cell_9)
+        for i in range(self.num_cells//3):
+            next_cell = getattr(self, "cell_%i"%cell_idx)
+            next_out = next_cell(*cell_stack[:2])
+            cell_stack = [next_out] + cell_stack
+            cell_idx += 1
 
-        x_reduction_cell_1 = self.reduction_cell_1(x_cell_11, x_cell_10)
+        x_reduction_cell_1 = self.reduction_cell_1(*cell_stack[:2])
+        cell_stack = [x_reduction_cell_1] + cell_stack
 
-        x_cell_12 = self.cell_12(x_reduction_cell_1, x_cell_10)
-        x_cell_13 = self.cell_13(x_cell_12, x_reduction_cell_1)
-        x_cell_14 = self.cell_14(x_cell_13, x_cell_12)
-        x_cell_15 = self.cell_15(x_cell_14, x_cell_13)
-        x_cell_16 = self.cell_16(x_cell_15, x_cell_14)
-        x_cell_17 = self.cell_17(x_cell_16, x_cell_15)
-        return x_cell_17
+        for i in range(self.num_cells//3):
+            next_cell = getattr(self, "cell_%i"%cell_idx)
+            next_out = next_cell(*cell_stack[:2])
+            cell_stack = [next_out] + cell_stack
+            cell_idx += 1
+
+        return cell_stack[0]
 
     def logits(self, features):
         x = self.relu(features)
@@ -644,6 +647,14 @@ class NASNetALarge(NASNet):
         super(NASNetALarge, self).__init__(num_conv_filters=168,
                 filter_scaling_rate=2, num_classes=num_classes, num_cells=18,
                 stem_multiplier=3)
+
+
+class NASNetAMobile(NASNet):
+
+    def __init__(self, num_classes=1001):
+        super(NASNetAMobile, self).__init__(num_conv_filters=44,
+                filter_scaling_rate=2, num_classes=num_classes, num_cells=12,
+                stem_multiplier=1)
 
 
 def nasnetalarge(num_classes=1001, pretrained='imagenet'):
@@ -723,8 +734,11 @@ if __name__ == "__main__":
     #torch.save(output, "nasnet_out.torch")
     ref_output = torch.load("nasnet_out.torch")
     print(torch.abs(output-ref_output).sum())
-    assert torch.abs(output-ref_output).sum().data.numpy() < 1e-5
+    assert torch.abs(output-ref_output).sum().data.numpy() < 1e-4
     print(output.size())
 
     # sanity of mobile version of the network
-
+    model = NASNetAMobile()
+    model.eval()
+    output = model(input)
+    print(output.size())
