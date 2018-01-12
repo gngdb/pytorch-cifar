@@ -519,10 +519,10 @@ class ReductionCell1(nn.Module):
         return x_out
 
 
-class NASNetALarge(nn.Module):
+class NASNet(nn.Module):
 
-    def __init__(self, num_classes=1001):
-        super(NASNetALarge, self).__init__()
+    def __init__(self, num_conv_filters, filter_scaling_rate, num_classes, num_cells):
+        super(NASNet, self).__init__()
         self.num_classes = num_classes
 
         self.conv0 = nn.Sequential()
@@ -533,55 +533,62 @@ class NASNetALarge(nn.Module):
         self.cell_stem_0 = CellStem0()
         self.cell_stem_1 = CellStem1()
 
-        self.cell_0 = FirstCell(in_channels_left=168, out_channels_left=84,
-                                in_channels_right=336, out_channels_right=168)
-        self.cell_1 = NormalCell(in_channels_left=336, out_channels_left=168,
-                                 in_channels_right=1008, out_channels_right=168)
-        self.cell_2 = NormalCell(in_channels_left=1008, out_channels_left=168,
-                                 in_channels_right=1008, out_channels_right=168)
-        self.cell_3 = NormalCell(in_channels_left=1008, out_channels_left=168,
-                                 in_channels_right=1008, out_channels_right=168)
-        self.cell_4 = NormalCell(in_channels_left=1008, out_channels_left=168,
-                                 in_channels_right=1008, out_channels_right=168)
-        self.cell_5 = NormalCell(in_channels_left=1008, out_channels_left=168,
-                                 in_channels_right=1008, out_channels_right=168)
+        self.block1 = []
+        nf, fs = num_conv_filters, filter_scaling_rate
+        cell_idx = 0
+        self.cell_0 = FirstCell(in_channels_left=nf, out_channels_left=nf//fs,
+                                in_channels_right=nf*fs, out_channels_right=nf)
+        self.block1.append(self.cell_0)
+        in_ch, out_ch = nf*(fs*3), nf
+        cells_per_block = num_cells//3
+        for i in range(cells_per_block-1):
+            cell_idx += 1
+            next_cell = NormalCell(in_channels_left=nf*fs if i == 0 else in_ch,
+                    out_channels_left=nf, in_channels_right=in_ch,
+                    out_channels_right=out_ch)
+            # hack to not break sanity check
+            setattr(self, "cell_%i"%cell_idx, next_cell)
+            self.block1.append(next_cell)
 
-        self.reduction_cell_0 = ReductionCell0(in_channels_left=1008, out_channels_left=336,
-                                               in_channels_right=1008, out_channels_right=336)
+        out_ch = nf*fs
+        self.reduction_cell_0 = ReductionCell0(in_channels_left=in_ch, out_channels_left=out_ch,
+                                               in_channels_right=in_ch, out_channels_right=out_ch)
 
-        self.cell_6 = FirstCell(in_channels_left=1008, out_channels_left=168,
-                                in_channels_right=1344, out_channels_right=336)
-        self.cell_7 = NormalCell(in_channels_left=1344, out_channels_left=336,
-                                 in_channels_right=2016, out_channels_right=336)
-        self.cell_8 = NormalCell(in_channels_left=2016, out_channels_left=336,
-                                 in_channels_right=2016, out_channels_right=336)
-        self.cell_9 = NormalCell(in_channels_left=2016, out_channels_left=336,
-                                 in_channels_right=2016, out_channels_right=336)
-        self.cell_10 = NormalCell(in_channels_left=2016, out_channels_left=336,
-                                  in_channels_right=2016, out_channels_right=336)
-        self.cell_11 = NormalCell(in_channels_left=2016, out_channels_left=336,
-                                  in_channels_right=2016, out_channels_right=336)
+        cell_idx += 1
+        next_cell = FirstCell(in_channels_left=in_ch, out_channels_left=out_ch//fs,
+                                in_channels_right=in_ch+nf*fs, out_channels_right=out_ch)
+        setattr(self, "cell_%i"%cell_idx, next_cell)
+        in_ch = nf*(fs*6)
+        for i in range(cells_per_block-1):
+            cell_idx += 1
+            next_cell = NormalCell(in_channels_left=nf*fs*4 if i == 0 else in_ch, out_channels_left=out_ch,
+                                 in_channels_right=in_ch, out_channels_right=out_ch)
+            setattr(self, "cell_%i"%cell_idx, next_cell)
+            self.block1.append(next_cell)
 
-        self.reduction_cell_1 = ReductionCell1(in_channels_left=2016, out_channels_left=672,
-                                               in_channels_right=2016, out_channels_right=672)
 
-        self.cell_12 = FirstCell(in_channels_left=2016, out_channels_left=336,
-                                 in_channels_right=2688, out_channels_right=672)
-        self.cell_13 = NormalCell(in_channels_left=2688, out_channels_left=672,
-                                  in_channels_right=4032, out_channels_right=672)
-        self.cell_14 = NormalCell(in_channels_left=4032, out_channels_left=672,
-                                  in_channels_right=4032, out_channels_right=672)
-        self.cell_15 = NormalCell(in_channels_left=4032, out_channels_left=672,
-                                  in_channels_right=4032, out_channels_right=672)
-        self.cell_16 = NormalCell(in_channels_left=4032, out_channels_left=672,
-                                  in_channels_right=4032, out_channels_right=672)
-        self.cell_17 = NormalCell(in_channels_left=4032, out_channels_left=672,
-                                  in_channels_right=4032, out_channels_right=672)
+        out_ch = nf*fs*2
+        self.reduction_cell_1 = ReductionCell1(in_channels_left=in_ch, out_channels_left=out_ch,
+                                               in_channels_right=in_ch, out_channels_right=out_ch)
+
+        cell_idx += 1
+        next_cell = FirstCell(in_channels_left=in_ch, out_channels_left=out_ch//fs,
+                                 in_channels_right=in_ch+nf*fs*2, out_channels_right=out_ch)
+        setattr(self, "cell_%i"%cell_idx, next_cell)
+
+        in_ch = nf*(fs*12)
+        for i in range(cells_per_block-1):
+            cell_idx += 1
+            next_cell = NormalCell(in_channels_left=nf*fs*8 if i == 0 else in_ch, out_channels_left=out_ch,
+                                      in_channels_right=in_ch, out_channels_right=out_ch)
+            setattr(self, "cell_%i"%cell_idx, next_cell)
+            self.block1.append(next_cell)
 
         self.relu = nn.ReLU()
-        self.avg_pool = nn.AvgPool2d(11, stride=1, padding=0)
+        # this size will be wrong for other input image sizes
+        self.avg_pool = nn.AvgPool2d(11, stride=1, padding=0) 
         self.dropout = nn.Dropout()
-        self.last_linear = nn.Linear(4032, self.num_classes)
+        self.last_linear = nn.Linear(in_ch, self.num_classes)
 
     def features(self, input):
         x_conv0 = self.conv0(input)
@@ -626,6 +633,13 @@ class NASNetALarge(nn.Module):
         x = self.features(input)
         x = self.logits(x)
         return x
+
+
+class NASNetALarge(NASNet):
+
+    def __init__(self, num_classes=1001):
+        super(NASNetALarge, self).__init__(num_conv_filters=168,
+                filter_scaling_rate=2, num_classes=num_classes, num_cells=18)
 
 
 def nasnetalarge(num_classes=1001, pretrained='imagenet'):
