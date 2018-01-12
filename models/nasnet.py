@@ -1,4 +1,5 @@
 # following from: https://github.com/Cadene/pretrained-models.pytorch
+# LICENSE of Original
 """
 BSD 3-Clause License
 
@@ -30,6 +31,7 @@ CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
 OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 """
+# Modified by Gavin Gray for Mobile, CIFAR and alternative Cell structures
 
 import torch
 import torch.nn as nn
@@ -688,11 +690,20 @@ def nasnetamobile(num_classes=1001, pretrained='imagenet'):
 
 
 if __name__ == "__main__":
-
     model = NASNetALarge()
+    model.eval()
+
+    # saved with original
+    #torch.save(model.state_dict(), "nasnet_state_dict.torch")
+    state_dict = torch.load("nasnet_state_dict.torch")
+    model.load_state_dict(state_dict)
 
     input = Variable(torch.randn(2,3,331,331))
     output = model(input)
+    #torch.save(output, "nasnet_out.torch")
+    ref_output = torch.load("nasnet_out.torch")
+    print(torch.abs(output-ref_output).sum())
+    assert torch.abs(output-ref_output).sum().data.numpy() < 1e-5
     print(output.size())
 
 
