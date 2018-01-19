@@ -72,7 +72,8 @@ else:
     # net = DPN92()
     # net = ShuffleNetG2()
     # net = SENet18()
-    net = PNASNet1()
+    # net = PNASNet1()
+    net = NASNetAcifar()
 
 if use_cuda:
     net.cuda()
@@ -109,7 +110,8 @@ def train(epoch):
         optimizer.zero_grad()
         inputs, targets = Variable(inputs), Variable(targets)
         outputs = net(inputs)
-        if isinstance(net.module, PNASNet):
+        #if isinstance(net.module, NASNet):
+        if False:
             outputs, aux_outputs = outputs[0], outputs[1]
             aux_loss = criterion(aux_outputs, targets)
         else:
