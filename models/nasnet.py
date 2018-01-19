@@ -326,6 +326,7 @@ class FirstCell(nn.Module):
         x_relu = self.relu(x_prev)
         # path 1
         x_path1 = self.path_1(x_relu)
+
         # path 2
         x_path2 = self.path_2.pad(x_relu)
         x_path2 = x_path2[:, :, 1:, 1:]
@@ -334,11 +335,17 @@ class FirstCell(nn.Module):
         # final path
         x_left = self.final_path_bn(torch.cat([x_path1, x_path2], 1))
 
+
         x_right = self.conv_1x1(x)
+
 
         x_comb_iter_0_left = self.comb_iter_0_left(x_right)
         x_comb_iter_0_right = self.comb_iter_0_right(x_left)
-        x_comb_iter_0 = x_comb_iter_0_left + x_comb_iter_0_right
+        try:
+            x_comb_iter_0 = x_comb_iter_0_left + x_comb_iter_0_right
+        except RuntimeError:
+            import pdb
+            pdb.set_trace()
 
         x_comb_iter_1_left = self.comb_iter_1_left(x_left)
         x_comb_iter_1_right = self.comb_iter_1_right(x_left)
@@ -523,32 +530,56 @@ class ReductionCell1(nn.Module):
 
 class NASNet(nn.Module):
 
-    def __init__(self, num_conv_filters, filter_scaling_rate, num_classes, num_cells, stem_multiplier):
+    def __init__(self, num_conv_filters, filter_scaling_rate, num_classes,
+            num_cells, stem_multiplier, stem):
         super(NASNet, self).__init__()
         self.num_classes = num_classes
         self.num_cells = num_cells
-        
-        stem_filters = 32*stem_multiplier
-        self.conv0 = nn.Sequential()
-        self.conv0.add_module('conv', nn.Conv2d(in_channels=3, out_channels=stem_filters, kernel_size=3, padding=0, stride=2,
-                                                bias=False))
-        self.conv0.add_module('bn', nn.BatchNorm2d(stem_filters, eps=0.001, momentum=0.1, affine=True))
+        self.stem = stem
 
-        self.cell_stem_0 = CellStem0(num_conv_filters, stem_multiplier)
-        self.cell_stem_1 = CellStem1(num_conv_filters, stem_multiplier)
+        stem_filters = 32*stem_multiplier
+        if self.stem == 'imagenet':
+            self.conv0 = nn.Sequential()
+            self.conv0.add_module('conv', nn.Conv2d(in_channels=3,
+                out_channels=stem_filters, kernel_size=3, padding=0, stride=2,
+                bias=False))
+            self.conv0.add_module('bn', nn.BatchNorm2d(stem_filters, eps=0.001,
+                momentum=0.1, affine=True))
+
+            self.cell_stem_0 = CellStem0(num_conv_filters, stem_multiplier)
+            self.cell_stem_1 = CellStem1(num_conv_filters, stem_multiplier)
+        elif self.stem == 'cifar':
+            self.conv0 = nn.Sequential()
+            self.conv0.add_module('conv', nn.Conv2d(in_channels=3,
+                out_channels=stem_filters, kernel_size=3, padding=1, stride=2,
+                bias=False))
+            self.conv0.add_module('bn', nn.BatchNorm2d(stem_filters, eps=0.001,
+                momentum=0.1, affine=True))           
+        else:
+            raise ValueError("Don't know what type of stem %s is."%stem)
 
         self.block1 = []
         nf, fs = num_conv_filters, filter_scaling_rate
         cell_idx = 0
-        self.cell_0 = FirstCell(in_channels_left=nf, out_channels_left=nf//fs,
-                                in_channels_right=nf*fs, out_channels_right=nf)
+        self.cell_0 = FirstCell(
+                in_channels_left=nf if self.stem == 'imagenet' else 3,
+                out_channels_left=nf//fs,
+                in_channels_right=nf*fs if self.stem == 'imagenet' else nf*stem_multiplier,
+                out_channels_right=nf)
         self.block1.append(self.cell_0)
         in_ch, out_ch = nf*(fs*3), nf
         cells_per_block = num_cells//3
         for i in range(cells_per_block-1):
             cell_idx += 1
-            next_cell = NormalCell(in_channels_left=nf*fs if i == 0 else in_ch,
-                    out_channels_left=nf, in_channels_right=in_ch,
+            if i==0 and self.stem=='imagenet':
+                ch_left = nf*fs if i == 0 else in_ch
+            elif i==0 and self.stem=='cifar':
+                ch_left = nf*stem_multiplier
+            else:
+                ch_left = in_ch
+            next_cell = NormalCell(in_channels_left=ch_left,
+                    out_channels_left=nf,
+                    in_channels_right=in_ch,
                     out_channels_right=out_ch)
             # hack to not break sanity check
             setattr(self, "cell_%i"%cell_idx, next_cell)
@@ -589,17 +620,18 @@ class NASNet(nn.Module):
             self.block1.append(next_cell)
 
         self.relu = nn.ReLU()
-        # this size will be wrong for other input image sizes
-        self.avg_pool = nn.AvgPool2d(11, stride=1, padding=0) 
         self.dropout = nn.Dropout()
         self.last_linear = nn.Linear(in_ch, self.num_classes)
 
     def features(self, input):
         x_conv0 = self.conv0(input)
-        x_stem_0 = self.cell_stem_0(x_conv0)
-        x_stem_1 = self.cell_stem_1(x_conv0, x_stem_0)
+        if self.stem == 'imagenet':
+            x_stem_0 = self.cell_stem_0(x_conv0)
+            x_stem_1 = self.cell_stem_1(x_conv0, x_stem_0)
+            cell_stack = [x_stem_1, x_stem_0]
+        else:
+            cell_stack = [x_conv0, input]
 
-        cell_stack = [x_stem_1, x_stem_0]
         cell_idx = 0
         for i in range(self.num_cells//3):
             next_cell = getattr(self, "cell_%i"%cell_idx)
@@ -629,7 +661,7 @@ class NASNet(nn.Module):
 
     def logits(self, features):
         x = self.relu(features)
-        x = self.avg_pool(x)
+        x = F.avg_pool2d(x, x.size(2))
         x = x.view(x.size(0), -1)
         x = self.dropout(x)
         x = self.last_linear(x)
@@ -646,7 +678,7 @@ class NASNetALarge(NASNet):
     def __init__(self, num_classes=1001):
         super(NASNetALarge, self).__init__(num_conv_filters=168,
                 filter_scaling_rate=2, num_classes=num_classes, num_cells=18,
-                stem_multiplier=3)
+                stem_multiplier=3, stem='imagenet')
 
 
 class NASNetAMobile(NASNet):
@@ -654,7 +686,13 @@ class NASNetAMobile(NASNet):
     def __init__(self, num_classes=1001):
         super(NASNetAMobile, self).__init__(num_conv_filters=44,
                 filter_scaling_rate=2, num_classes=num_classes, num_cells=12,
-                stem_multiplier=1)
+                stem_multiplier=1, stem='imagenet')
+
+class NASNetAcifar(NASNet):
+    def __init__(self, num_classes=10):
+        super(NASNetAcifar, self).__init__(num_conv_filters=32,
+                filter_scaling_rate=2, num_classes=num_classes, num_cells=18,
+                stem_multiplier=3, stem='cifar')
 
 
 def nasnetalarge(num_classes=1001, pretrained='imagenet'):
@@ -740,5 +778,12 @@ if __name__ == "__main__":
     # sanity of mobile version of the network
     model = NASNetAMobile()
     model.eval()
+    output = model(input)
+    print(output.size())
+
+    # sanity of cifar network
+    model = NASNetAcifar()
+    model.eval()
+    input = Variable(torch.randn(2,3,32,32))
     output = model(input)
     print(output.size())
