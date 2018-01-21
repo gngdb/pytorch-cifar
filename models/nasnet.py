@@ -674,7 +674,6 @@ class NASNet(nn.Module):
 
 
 class NASNetALarge(NASNet):
-
     def __init__(self, num_classes=1001):
         super(NASNetALarge, self).__init__(num_conv_filters=168,
                 filter_scaling_rate=2, num_classes=num_classes, num_cells=18,
@@ -682,11 +681,11 @@ class NASNetALarge(NASNet):
 
 
 class NASNetAMobile(NASNet):
-
     def __init__(self, num_classes=1001):
         super(NASNetAMobile, self).__init__(num_conv_filters=44,
                 filter_scaling_rate=2, num_classes=num_classes, num_cells=12,
                 stem_multiplier=1, stem='imagenet')
+
 
 class NASNetAcifar(NASNet):
     def __init__(self, num_classes=10):
@@ -787,3 +786,17 @@ if __name__ == "__main__":
     input = Variable(torch.randn(2,3,32,32))
     output = model(input)
     print(output.size())
+
+    # check speed of large network
+    model = NASNetALarge()
+    model.eval().cuda()
+    
+    import time
+    avg = 0.0
+    for i in range(10):
+        before = time.time()
+        input = Variable(torch.randn(1,3,331,331)).cuda()
+        output = model(input)
+        elapsed = time.time() - before
+        avg += elapsed/10.
+    print("Average executation time %.2f per minibatch"%avg)
