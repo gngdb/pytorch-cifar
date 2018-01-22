@@ -355,7 +355,6 @@ class BaseCell(nn.Module):
         x_right = self.conv_1x1(x)
         branch_inputs = {'left':x_left, 'right':x_right}
 
-        branch_outputs = [x_left]
         for i in range(self._count_branches()):
             left_input = branch_inputs[getattr(self, 'comb_iter_%i_left_input'%i)]
             right_input = branch_inputs[getattr(self, 'comb_iter_%i_right_input'%i)]
@@ -367,9 +366,10 @@ class BaseCell(nn.Module):
                 right_out = getattr(self, 'comb_iter_%i_right'%i)(right_input)
             else:
                 right_out = right_input
-            branch_outputs.append(right_out + left_out)
+            out = right_out + left_out
+            branch_inputs['comb_iter_%i'%i] = out
 
-        return torch.cat(branch_outputs, 1)
+        return torch.cat([branch_inputs[k] for k in self.to_cat], 1)
 
 
 class NormalCell(BaseCell):
@@ -396,61 +396,34 @@ class NormalCell(BaseCell):
 
         self.register_branch(BranchSeparables(out_channels_right, out_channels_right, 3, 1, 1, bias=False), None,
                              'right', 'right')
+        
+        self.to_cat = ['left'] + ['comb_iter_%i'%i for i in range(5)]
 
 
-class ReductionCell(nn.Module):
+class ReductionCell(BaseCell):
 
     def __init__(self, in_channels_left, out_channels_left, in_channels_right, out_channels_right, pad=False):
-        super(ReductionCell, self).__init__() 
-        self.conv_prev_1x1 = nn.Sequential()
-        self.conv_prev_1x1.add_module('relu', nn.ReLU())
-        self.conv_prev_1x1.add_module('conv', nn.Conv2d(in_channels_left, out_channels_left, 1, stride=1, bias=False))
-        self.conv_prev_1x1.add_module('bn', nn.BatchNorm2d(out_channels_left, eps=0.001, momentum=0.1, affine=True))
-
-        self.conv_1x1 = nn.Sequential()
-        self.conv_1x1.add_module('relu', nn.ReLU())
-        self.conv_1x1.add_module('conv', nn.Conv2d(in_channels_right, out_channels_right, 1, stride=1, bias=False))
-        self.conv_1x1.add_module('bn', nn.BatchNorm2d(out_channels_right, eps=0.001, momentum=0.1, affine=True))
-
-        self.comb_iter_0_left = BranchSeparables(out_channels_right, out_channels_right, 5, 2, 2, bias=False, reduction=pad)
-        self.comb_iter_0_right = BranchSeparables(out_channels_right, out_channels_right, 7, 2, 3, bias=False, reduction=pad)
+        super(ReductionCell, self).__init__(in_channels_left, out_channels_left, in_channels_right, out_channels_right, False) 
         
-        self.comb_iter_1_left = MaxPool(pad=pad)
-        self.comb_iter_1_right = BranchSeparables(out_channels_right, out_channels_right, 7, 2, 3, bias=False, reduction=pad)
+        self.register_branch(BranchSeparables(out_channels_right, out_channels_right, 5, 2, 2, bias=False, reduction=pad),
+                             BranchSeparables(out_channels_right, out_channels_right, 7, 2, 3, bias=False, reduction=pad),
+                             'right', 'left')
+        
+        self.register_branch(MaxPool(pad=pad),
+                             BranchSeparables(out_channels_right, out_channels_right, 7, 2, 3, bias=False, reduction=pad),
+                             'right', 'left')
 
-        self.comb_iter_2_left = AvgPool(pad=pad)
-        self.comb_iter_2_right = BranchSeparables(out_channels_right, out_channels_right, 5, 2, 2, bias=False, reduction=pad)
+        self.register_branch(AvgPool(pad=pad),
+                             BranchSeparables(out_channels_right, out_channels_right, 5, 2, 2, bias=False, reduction=pad),
+                             'right', 'left')
 
-        self.comb_iter_3_right = nn.AvgPool2d(3, stride=1, padding=1, count_include_pad=False)
+        self.register_branch(None, nn.AvgPool2d(3, stride=1, padding=1, count_include_pad=False),
+                             'comb_iter_1', 'comb_iter_0')
 
-        self.comb_iter_4_left = BranchSeparables(out_channels_right, out_channels_right, 3, 1, 1, bias=False, reduction=pad)
-        self.comb_iter_4_right = MaxPool(pad=pad)
+        self.register_branch(BranchSeparables(out_channels_right, out_channels_right, 3, 1, 1, bias=False, reduction=pad),
+                             MaxPool(pad=pad), 'comb_iter_0', 'right')
 
-    def forward(self, x, x_prev):
-        x_left = self.conv_prev_1x1(x_prev)
-        x_right = self.conv_1x1(x)
-
-        x_comb_iter_0_left = self.comb_iter_0_left(x_right)
-        x_comb_iter_0_right = self.comb_iter_0_right(x_left)
-        x_comb_iter_0 = x_comb_iter_0_left + x_comb_iter_0_right
-
-        x_comb_iter_1_left = self.comb_iter_1_left(x_right)
-        x_comb_iter_1_right = self.comb_iter_1_right(x_left)
-        x_comb_iter_1 = x_comb_iter_1_left + x_comb_iter_1_right
-
-        x_comb_iter_2_left = self.comb_iter_2_left(x_right)
-        x_comb_iter_2_right = self.comb_iter_2_right(x_left)
-        x_comb_iter_2 = x_comb_iter_2_left + x_comb_iter_2_right
-
-        x_comb_iter_3_right = self.comb_iter_3_right(x_comb_iter_0)
-        x_comb_iter_3 = x_comb_iter_3_right + x_comb_iter_1
-
-        x_comb_iter_4_left = self.comb_iter_4_left(x_comb_iter_0)
-        x_comb_iter_4_right = self.comb_iter_4_right(x_right)
-        x_comb_iter_4 = x_comb_iter_4_left + x_comb_iter_4_right
-
-        x_out = torch.cat([x_comb_iter_1, x_comb_iter_2, x_comb_iter_3, x_comb_iter_4], 1)
-        return x_out
+        self.to_cat = ['comb_iter_%i'%i for i in range(1,5)]
 
 
 class NASNet(nn.Module):
@@ -728,4 +701,4 @@ if __name__ == "__main__":
         output = model(input)
         elapsed = time.time() - before
         avg += elapsed/10.
-    print("Average executation time %.2f per minibatch"%avg)
+    print("Average execution time %.2f per minibatch"%avg)
