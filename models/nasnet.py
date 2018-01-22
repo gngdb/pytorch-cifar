@@ -275,40 +275,8 @@ def guess_output_channels(module, in_channels):
     return n_out
 
 class BaseCell(nn.Module):
-    def output_channels(self):
-        n_out = 0
-        for i in range(self._count_branches()):
-            try:
-                left = getattr(self, 'comb_iter_%i_left'%branch_idx)
-                n_out += guess_output_channels(left, self.in_channels_left)
-                continue # other side of this branch must match
-            except AttributeError:
-                pass
-            try:
-                right = getattr(self, 'comb_iter_%i_right'%branch_idx)
-                n_out += guess_output_channels(right, self.in_channels_right)
-            except AttributeError:
-                pass
-
-    def _count_branches(self):
-        branch_idx = 0
-        while hasattr(self, 'comb_iter_%i_left'%branch_idx) or\
-              hasattr(self, 'comb_iter_%i_right'%branch_idx):
-            branch_idx += 1
-        return branch_idx
-
-    def register_branch(self, left, right):
-        # how many do we have already?
-        n_branches = self._count_branches()
-        if left is not None:
-            setattr(self, 'comb_iter_%i_left'%n_branches, left)
-        if right is not None:
-            setattr(self, 'comb_iter_%i_right'%n_branches, right)
-
-class NormalCell(BaseCell):
-
     def __init__(self, in_channels_left, out_channels_left, in_channels_right,
-            out_channels_right, factorized_reduction=False):
+            out_channels_right, factorized_reduction):
         super(BaseCell, self).__init__()
         self.in_channels_left, self.out_channels_left = in_channels_left, out_channels_left
         self.in_channels_right, self.out_channels_right = in_channels_right, out_channels_right
@@ -335,18 +303,38 @@ class NormalCell(BaseCell):
             self.conv_prev_1x1.add_module('conv', nn.Conv2d(in_channels_left, out_channels_left, 1, stride=1, bias=False))
             self.conv_prev_1x1.add_module('bn', nn.BatchNorm2d(out_channels_left, eps=0.001, momentum=0.1, affine=True))
 
-        self.register_branch(BranchSeparables(out_channels_right, out_channels_right, 5, 1, 2, bias=False),
-                             BranchSeparables(out_channels_right, out_channels_right, 3, 1, 1, bias=False))
+    def output_channels(self):
+        n_out = 0
+        for i in range(self._count_branches()):
+            try:
+                left = getattr(self, 'comb_iter_%i_left'%branch_idx)
+                n_out += guess_output_channels(left, self.in_channels_left)
+                continue # other side of this branch must match
+            except AttributeError:
+                pass
+            try:
+                right = getattr(self, 'comb_iter_%i_right'%branch_idx)
+                n_out += guess_output_channels(right, self.in_channels_right)
+            except AttributeError:
+                pass
+        return n_out
 
-        self.register_branch(BranchSeparables(out_channels_right, out_channels_right, 5, 1, 2, bias=False),
-                             BranchSeparables(out_channels_right, out_channels_right, 3, 1, 1, bias=False))
+    def _count_branches(self):
+        branch_idx = 0
+        while hasattr(self, 'comb_iter_%i_left'%branch_idx) or\
+              hasattr(self, 'comb_iter_%i_right'%branch_idx):
+            branch_idx += 1
+        return branch_idx
 
-        self.register_branch(nn.AvgPool2d(3, stride=1, padding=1, count_include_pad=False), None)
-
-        self.register_branch(nn.AvgPool2d(3, stride=1, padding=1, count_include_pad=False),
-                             nn.AvgPool2d(3, stride=1, padding=1, count_include_pad=False))
-
-        self.register_branch(BranchSeparables(out_channels_right, out_channels_right, 3, 1, 1, bias=False), None)
+    def register_branch(self, left, right, left_input_key, right_input_key):
+        # how many do we have already?
+        n_branches = self._count_branches()
+        self.__dict__['comb_iter_%i_left_input'%n_branches] = left_input_key
+        self.__dict__['comb_iter_%i_right_input'%n_branches] = right_input_key
+        if left is not None:
+            setattr(self, 'comb_iter_%i_left'%n_branches, left)
+        if right is not None:
+            setattr(self, 'comb_iter_%i_right'%n_branches, right)
 
     def forward(self, x, x_prev):
         if self.factorized_reduction:
@@ -365,27 +353,49 @@ class NormalCell(BaseCell):
             x_left = self.conv_prev_1x1(x_prev)
 
         x_right = self.conv_1x1(x)
+        branch_inputs = {'left':x_left, 'right':x_right}
 
-        x_comb_iter_0_left = self.comb_iter_0_left(x_right)
-        x_comb_iter_0_right = self.comb_iter_0_right(x_left)
-        x_comb_iter_0 = x_comb_iter_0_left + x_comb_iter_0_right
+        branch_outputs = [x_left]
+        for i in range(self._count_branches()):
+            left_input = branch_inputs[getattr(self, 'comb_iter_%i_left_input'%i)]
+            right_input = branch_inputs[getattr(self, 'comb_iter_%i_right_input'%i)]
+            if hasattr(self, 'comb_iter_%i_left'%i):
+                left_out = getattr(self, 'comb_iter_%i_left'%i)(left_input)
+            else:
+                left_out = left_input
+            if hasattr(self, 'comb_iter_%i_right'%i):
+                right_out = getattr(self, 'comb_iter_%i_right'%i)(right_input)
+            else:
+                right_out = right_input
+            branch_outputs.append(right_out + left_out)
 
-        x_comb_iter_1_left = self.comb_iter_1_left(x_left)
-        x_comb_iter_1_right = self.comb_iter_1_right(x_left)
-        x_comb_iter_1 = x_comb_iter_1_left + x_comb_iter_1_right
+        return torch.cat(branch_outputs, 1)
 
-        x_comb_iter_2_left = self.comb_iter_2_left(x_right)
-        x_comb_iter_2 = x_comb_iter_2_left + x_left
 
-        x_comb_iter_3_left = self.comb_iter_3_left(x_left)
-        x_comb_iter_3_right = self.comb_iter_3_right(x_left)
-        x_comb_iter_3 = x_comb_iter_3_left + x_comb_iter_3_right
+class NormalCell(BaseCell):
 
-        x_comb_iter_4_left = self.comb_iter_4_left(x_right)
-        x_comb_iter_4 = x_comb_iter_4_left + x_right
+    def __init__(self, in_channels_left, out_channels_left, in_channels_right,
+            out_channels_right, factorized_reduction=False):
+        super(NormalCell, self).__init__(in_channels_left, out_channels_left,
+                in_channels_right, out_channels_right, factorized_reduction)
 
-        x_out = torch.cat([x_left, x_comb_iter_0, x_comb_iter_1, x_comb_iter_2, x_comb_iter_3, x_comb_iter_4], 1)
-        return x_out
+        self.register_branch(BranchSeparables(out_channels_right, out_channels_right, 5, 1, 2, bias=False),
+                             BranchSeparables(out_channels_right, out_channels_right, 3, 1, 1, bias=False),
+                             'right', 'left')
+
+        self.register_branch(BranchSeparables(out_channels_right, out_channels_right, 5, 1, 2, bias=False),
+                             BranchSeparables(out_channels_right, out_channels_right, 3, 1, 1, bias=False),
+                             'left', 'left')
+
+        self.register_branch(nn.AvgPool2d(3, stride=1, padding=1, count_include_pad=False), None,
+                             'right', 'left')
+
+        self.register_branch(nn.AvgPool2d(3, stride=1, padding=1, count_include_pad=False),
+                             nn.AvgPool2d(3, stride=1, padding=1, count_include_pad=False),
+                             'left', 'left')
+
+        self.register_branch(BranchSeparables(out_channels_right, out_channels_right, 3, 1, 1, bias=False), None,
+                             'right', 'right')
 
 
 class ReductionCell(nn.Module):
