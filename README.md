@@ -1,12 +1,14 @@
-# ABORTED ATTEMPT TO PORT PNASNET TO PYTORCH
+# Training NASNet in PyTorch on CIFAR-10
 
-I tried to port the [tensorflow definition of nasnet][tf] and couldn't get
-it to work. Was trying to do this just by inspection and trying to respect
-pytorch idioms. Unfortunately, nasnet is too complicated to do this well,
-and I've probably made some mistake.
+This is a port of the [tensorflow definition of nasnet][tf], created by
+refactoring the [implementation of the Large and Mobile in PyTorch by
+Cadene][cadene] so that it would be possible to define the CIFAR-10 version
+of the network. Also, code to implement the path-based dropout and
+auxiliary classification head output has been added.
 
-Network fails to train past 90% accuracy, and completely fails to train
-with regularisation enabled. Suspect problem with intiailisation or
-optimizer, but could easily be some problem with the network definition.
+## Training details
+
+TBA
 
 [tf]: https://github.com/tensorflow/models/tree/master/research/slim/nets/nasnet
+[cadene]: https://github.com/Cadene/pretrained-models.pytorch/blob/master/pretrainedmodels/models/nasnet.py
