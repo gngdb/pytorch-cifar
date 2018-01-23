@@ -167,7 +167,9 @@ class AuxHead(nn.Module):
         out = self.conv2d_fc(out)
         out = self.conv2d_fc_bn(out)
         out = F.relu(out)
-        return self.linear(out.view(out.size(0),-1))
+        n, c, w, h = out.size() 
+        out = out.view(n, c, w*h).mean(2) # this is not true in tf
+        return self.linear(out)
 
 
 class DropPath(nn.Module):
@@ -636,7 +638,7 @@ class NASNet(nn.Module):
             cell_idx += 1
 
         # stores most recent aux out in model
-        #self.aux_out = self.aux_head(cell_stack[0])
+        self.aux_out = self.aux_head(cell_stack[0])
 
         x_reduction_cell_1 = self.reduction_cell_1(*cell_stack[:2])
         cell_stack = [x_reduction_cell_1] + cell_stack
