@@ -336,8 +336,12 @@ class BaseCell(nn.Module):
         for i in range(self._count_branches()):
             try:
                 left = getattr(self, 'comb_iter_%i_left'%i)
+                if self.factorized_reduction:
+                    ch = self.out_channels_left*2
+                else:
+                    ch = self.out_channels_left
                 n_out['comb_iter_%i'%i] = \
-                        guess_output_channels(left, self.out_channels_left)
+                        guess_output_channels(left, ch)
             except AttributeError:
                 pass
             try:
@@ -347,7 +351,8 @@ class BaseCell(nn.Module):
                         guess_output_channels(right, self.out_channels_right)
             except AttributeError:
                 pass
-        n_out['left'] = self.out_channels_left
+        n_out['left'] = self.out_channels_left*2 if self.factorized_reduction \
+                else self.out_channels_left
         n_out['right'] = self.out_channels_right
         return sum([n_out[k] for k in self.to_cat])
 
@@ -695,10 +700,39 @@ def nasnetamobile(num_classes=1001, pretrained='imagenet'):
         model = NASNetALarge(num_classes=num_classes)
     return model
 
+def channel_inference_test(model, batch_size=2):
+    assert isinstance(model, NASNetALarge)
+    endpoints_shapes = {'cell_0': [batch_size, 42, 42, 1008],
+                        'cell_1': [batch_size, 42, 42, 1008],
+                        'cell_2': [batch_size, 42, 42, 1008],
+                        'cell_3': [batch_size, 42, 42, 1008],
+                        'cell_4': [batch_size, 42, 42, 1008],
+                        'cell_5': [batch_size, 42, 42, 1008],
+                        'cell_6': [batch_size, 21, 21, 2016],
+                        'cell_7': [batch_size, 21, 21, 2016],
+                        'cell_8': [batch_size, 21, 21, 2016],
+                        'cell_9': [batch_size, 21, 21, 2016],
+                        'cell_10': [batch_size, 21, 21, 2016],
+                        'cell_11': [batch_size, 21, 21, 2016],
+                        'cell_12': [batch_size, 11, 11, 4032],
+                        'cell_13': [batch_size, 11, 11, 4032],
+                        'cell_14': [batch_size, 11, 11, 4032],
+                        'cell_15': [batch_size, 11, 11, 4032],
+                        'cell_16': [batch_size, 11, 11, 4032],
+                        'cell_17': [batch_size, 11, 11, 4032],
+                        'reduction_cell_0': [batch_size, 21, 21, 1344],
+                        'reduction_cell_1': [batch_size, 11, 11, 2688]}
+    for k in sorted(endpoints_shapes.keys()):
+        cell = getattr(model, k)
+        if not cell.output_channels() == endpoints_shapes[k][3]:
+            raise ValueError("Cell %s: inferred channels %i does not match expected output channels for this model %i"%(k, cell.output_channels(), endpoints_shapes[k][3]))
 
 if __name__ == "__main__":
     model = NASNetALarge()
     model.eval()
+
+    # test channel size inference
+    channel_inference_test(model)
 
     # checks output hasn't changed from original version
 
