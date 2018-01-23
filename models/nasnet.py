@@ -170,6 +170,38 @@ class AuxHead(nn.Module):
         return self.linear(out.view(out.size(0),-1))
 
 
+class DropPath(nn.Module):
+    """
+    Zeros input x with probability 1-p independently over examples.
+    p is the probability of keeping the input, the opposite of the normal
+    operation of the Dropout module.
+    """
+
+    def __init__(self, p=0.5, inplace=False):
+        super(DropPath, self).__init__()
+        if p < 0 or p > 1:
+            raise ValueError("dropout probability has to be between 0 and 1, "
+                             "but got {}".format(p))
+        self.keep_prob, self.p = p, 1.-p
+        self.inplace = inplace
+
+    def forward(self, input):
+        if not self.training or self.keep_prob > 0.99:
+            return input
+        batch_size = input.size(0)
+        mask = torch.ones(batch_size, 1, 1, 1)
+        if input.is_cuda:
+            mask = mask.cuda()
+        mask = F.dropout(mask, self.p, self.training, self.inplace)
+        return mask*input
+
+    def __repr__(self):
+        inplace_str = ', inplace' if self.inplace else ''
+        return self.__class__.__name__ + '(' \
+            + 'p=' + str(self.p) \
+            + inplace_str + ')'
+
+
 class CellStem0(nn.Module):
 
     def __init__(self, num_conv_filters, stem_multiplier, celltype='A'):
@@ -304,7 +336,7 @@ def guess_output_channels(module, in_channels):
 
 class BaseCell(nn.Module):
     def __init__(self, in_channels_left, out_channels_left, in_channels_right,
-            out_channels_right, factorized_reduction):
+            out_channels_right, factorized_reduction, keep_prob):
         super(BaseCell, self).__init__()
         self.in_channels_left, self.out_channels_left = in_channels_left, out_channels_left
         self.in_channels_right, self.out_channels_right = in_channels_right, out_channels_right
@@ -330,6 +362,8 @@ class BaseCell(nn.Module):
             self.conv_prev_1x1.add_module('relu', nn.ReLU())
             self.conv_prev_1x1.add_module('conv', nn.Conv2d(in_channels_left, out_channels_left, 1, stride=1, bias=False))
             self.conv_prev_1x1.add_module('bn', nn.BatchNorm2d(out_channels_left, eps=0.001, momentum=0.1, affine=True))
+
+        self.drop_path = DropPath(p=keep_prob)
 
     def output_channels(self):
         n_out = {}
@@ -405,6 +439,7 @@ class BaseCell(nn.Module):
             else:
                 right_out = right_input
             out = right_out + left_out
+            out = self.drop_path(out) # randomly drop branches during training
             branch_inputs['comb_iter_%i'%i] = out
 
         return torch.cat([branch_inputs[k] for k in self.to_cat], 1)
@@ -413,9 +448,10 @@ class BaseCell(nn.Module):
 class NormalCell(BaseCell):
 
     def __init__(self, in_channels_left, out_channels_left, in_channels_right,
-            out_channels_right, factorized_reduction=False):
+            out_channels_right, keep_prob, factorized_reduction=False):
         super(NormalCell, self).__init__(in_channels_left, out_channels_left,
-                in_channels_right, out_channels_right, factorized_reduction)
+                in_channels_right, out_channels_right, factorized_reduction,
+                keep_prob)
 
         self.register_branch(BranchSeparables(out_channels_right, out_channels_right, 5, 1, 2, bias=False),
                              BranchSeparables(out_channels_right, out_channels_right, 3, 1, 1, bias=False),
@@ -440,8 +476,8 @@ class NormalCell(BaseCell):
 
 class ReductionCell(BaseCell):
 
-    def __init__(self, in_channels_left, out_channels_left, in_channels_right, out_channels_right, pad=False):
-        super(ReductionCell, self).__init__(in_channels_left, out_channels_left, in_channels_right, out_channels_right, False) 
+    def __init__(self, in_channels_left, out_channels_left, in_channels_right, out_channels_right, keep_prob, pad=False):
+        super(ReductionCell, self).__init__(in_channels_left, out_channels_left, in_channels_right, out_channels_right, False, keep_prob) 
         
         self.register_branch(BranchSeparables(out_channels_right, out_channels_right, 5, 2, 2, bias=False, reduction=pad),
                              BranchSeparables(out_channels_right, out_channels_right, 7, 2, 3, bias=False, reduction=pad),
@@ -467,7 +503,7 @@ class ReductionCell(BaseCell):
 class NASNet(nn.Module):
 
     def __init__(self, num_conv_filters, filter_scaling_rate, num_classes,
-            num_cells, stem_multiplier, stem):
+            num_cells, stem_multiplier, stem, drop_path_keep_prob):
         super(NASNet, self).__init__()
         self.num_classes = num_classes
         self.num_cells = num_cells
@@ -502,6 +538,7 @@ class NASNet(nn.Module):
                 out_channels_left=nf//fs,
                 in_channels_right=nf*fs if self.stem == 'imagenet' else nf*stem_multiplier,
                 out_channels_right=nf,
+                keep_prob=drop_path_keep_prob,
                 factorized_reduction=True)
         self.block1.append(self.cell_0)
         in_ch, out_ch = nf*(fs*3), nf
@@ -517,7 +554,8 @@ class NASNet(nn.Module):
             next_cell = NormalCell(in_channels_left=ch_left,
                     out_channels_left=nf,
                     in_channels_right=in_ch,
-                    out_channels_right=out_ch)
+                    out_channels_right=out_ch,
+                    keep_prob=drop_path_keep_prob)
             # hack to not break sanity check
             setattr(self, "cell_%i"%cell_idx, next_cell)
             self.block1.append(next_cell)
@@ -525,18 +563,21 @@ class NASNet(nn.Module):
         out_ch = nf*fs
         self.reduction_cell_0 = ReductionCell(in_channels_left=in_ch, out_channels_left=out_ch,
                                               in_channels_right=in_ch, out_channels_right=out_ch,
+                                              keep_prob=drop_path_keep_prob,
                                               pad=True)
 
         cell_idx += 1
         next_cell = NormalCell(in_channels_left=in_ch, out_channels_left=out_ch//fs,
                                in_channels_right=in_ch+nf*fs, out_channels_right=out_ch,
+                               keep_prob=drop_path_keep_prob,
                                factorized_reduction=True)
         setattr(self, "cell_%i"%cell_idx, next_cell)
         in_ch = nf*(fs*6)
         for i in range(cells_per_block-1):
             cell_idx += 1
             next_cell = NormalCell(in_channels_left=nf*fs*4 if i == 0 else in_ch, out_channels_left=out_ch,
-                                 in_channels_right=in_ch, out_channels_right=out_ch)
+                                 in_channels_right=in_ch, out_channels_right=out_ch,
+                                 keep_prob=drop_path_keep_prob)
             setattr(self, "cell_%i"%cell_idx, next_cell)
             self.block1.append(next_cell)
 
@@ -546,11 +587,13 @@ class NASNet(nn.Module):
 
         out_ch = nf*fs*2
         self.reduction_cell_1 = ReductionCell(in_channels_left=in_ch, out_channels_left=out_ch,
-                                              in_channels_right=in_ch, out_channels_right=out_ch)
+                                              in_channels_right=in_ch, out_channels_right=out_ch,
+                                              keep_prob=drop_path_keep_prob)
 
         cell_idx += 1
         next_cell = NormalCell(in_channels_left=in_ch, out_channels_left=out_ch//fs,
                                in_channels_right=in_ch+nf*fs*2, out_channels_right=out_ch, 
+                               keep_prob=drop_path_keep_prob,
                                factorized_reduction=True)
         setattr(self, "cell_%i"%cell_idx, next_cell)
 
@@ -558,7 +601,8 @@ class NASNet(nn.Module):
         for i in range(cells_per_block-1):
             cell_idx += 1
             next_cell = NormalCell(in_channels_left=nf*fs*8 if i == 0 else in_ch, out_channels_left=out_ch,
-                                      in_channels_right=in_ch, out_channels_right=out_ch)
+                                      in_channels_right=in_ch, out_channels_right=out_ch,
+                                      keep_prob=drop_path_keep_prob)
             setattr(self, "cell_%i"%cell_idx, next_cell)
             self.block1.append(next_cell)
 
@@ -623,21 +667,21 @@ class NASNetALarge(NASNet):
     def __init__(self, num_classes=1001):
         super(NASNetALarge, self).__init__(num_conv_filters=168,
                 filter_scaling_rate=2, num_classes=num_classes, num_cells=18,
-                stem_multiplier=3, stem='imagenet')
+                stem_multiplier=3, stem='imagenet', drop_path_keep_prob=0.7)
 
 
 class NASNetAMobile(NASNet):
     def __init__(self, num_classes=1001):
         super(NASNetAMobile, self).__init__(num_conv_filters=44,
                 filter_scaling_rate=2, num_classes=num_classes, num_cells=12,
-                stem_multiplier=1, stem='imagenet')
+                stem_multiplier=1, stem='imagenet', drop_path_keep_prob=1.0)
 
 
 class NASNetAcifar(NASNet):
     def __init__(self, num_classes=10):
         super(NASNetAcifar, self).__init__(num_conv_filters=32,
                 filter_scaling_rate=2, num_classes=num_classes, num_cells=18,
-                stem_multiplier=3, stem='cifar')
+                stem_multiplier=3, stem='cifar', drop_path_keep_prob=0.6)
 
 
 def nasnetalarge(num_classes=1001, pretrained='imagenet'):
@@ -767,13 +811,13 @@ if __name__ == "__main__":
 
     # check speed of large network
     model = NASNetALarge()
-    model.eval().cuda()
+    model.train().cuda()
     
     import time
     avg = 0.0
     for i in range(10):
         before = time.time()
-        input = Variable(torch.randn(1,3,331,331)).cuda()
+        input = Variable(torch.randn(2,3,331,331)).cuda()
         output = model(input)
         elapsed = time.time() - before
         avg += elapsed/10.
