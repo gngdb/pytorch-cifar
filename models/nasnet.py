@@ -146,6 +146,30 @@ class BranchSeparables(nn.Module):
         return x
 
 
+class AuxHead(nn.Module):
+    def __init__(self, in_planes, num_classes=10):
+        super(AuxHead, self).__init__()
+        # aux output to improve convergence (classification shortcut)
+        self.pool = nn.AvgPool2d(5, stride=3)
+        # local shape inference
+        self.pointwise = nn.Conv2d(in_planes, 128, 1)
+        self.pointwise_bn = nn.BatchNorm2d(128)
+        # NASNet's way of implementing a fc layer is wild
+        self.conv2d_fc = nn.Conv2d(128, 728, 1)
+        self.conv2d_fc_bn = nn.BatchNorm2d(728)
+        self.linear = nn.Linear(728, num_classes)
+
+    def forward(self, x):
+        out = self.pool(x)
+        out = self.pointwise(out)
+        out = self.pointwise_bn(out)
+        out = F.relu(out)
+        out = self.conv2d_fc(out)
+        out = self.conv2d_fc_bn(out)
+        out = F.relu(out)
+        return self.linear(out.view(out.size(0),-1))
+
+
 class CellStem0(nn.Module):
 
     def __init__(self, num_conv_filters, stem_multiplier, celltype='A'):
@@ -270,8 +294,12 @@ class CellStem1(nn.Module):
 def guess_output_channels(module, in_channels):
     if isinstance(module, BranchSeparables):
         n_out = module.bn_sep_2.num_features
-    elif isinstance(module, MaxPool) or isinstance(module, AvgPool):
+    elif isinstance(module, MaxPool) or isinstance(module, AvgPool) or \
+         isinstance(module, nn.MaxPool2d) or isinstance(module, nn.AvgPool2d):
         n_out = in_channels
+    else:
+        raise ValueError("Don't know how many output channels this module has"
+        ": %s"%module)
     return n_out
 
 class BaseCell(nn.Module):
@@ -304,20 +332,24 @@ class BaseCell(nn.Module):
             self.conv_prev_1x1.add_module('bn', nn.BatchNorm2d(out_channels_left, eps=0.001, momentum=0.1, affine=True))
 
     def output_channels(self):
-        n_out = 0
+        n_out = {}
         for i in range(self._count_branches()):
             try:
-                left = getattr(self, 'comb_iter_%i_left'%branch_idx)
-                n_out += guess_output_channels(left, self.in_channels_left)
-                continue # other side of this branch must match
+                left = getattr(self, 'comb_iter_%i_left'%i)
+                n_out['comb_iter_%i'%i] = \
+                        guess_output_channels(left, self.out_channels_left)
             except AttributeError:
                 pass
             try:
-                right = getattr(self, 'comb_iter_%i_right'%branch_idx)
-                n_out += guess_output_channels(right, self.in_channels_right)
+                right = getattr(self, 'comb_iter_%i_right'%i)
+                if 'comb_iter_%i' not in n_out:
+                    n_out['comb_iter_%i'%i] = \
+                        guess_output_channels(right, self.out_channels_right)
             except AttributeError:
                 pass
-        return n_out
+        n_out['left'] = self.out_channels_left
+        n_out['right'] = self.out_channels_right
+        return sum([n_out[k] for k in self.to_cat])
 
     def _count_branches(self):
         branch_idx = 0
@@ -353,6 +385,7 @@ class BaseCell(nn.Module):
             x_left = self.conv_prev_1x1(x_prev)
 
         x_right = self.conv_1x1(x)
+        # branch_inputs is a bad name, considering these are combined to create the output
         branch_inputs = {'left':x_left, 'right':x_right}
 
         for i in range(self._count_branches()):
@@ -503,6 +536,9 @@ class NASNet(nn.Module):
             self.block1.append(next_cell)
 
 
+        in_planes = next_cell.output_channels()
+        self.aux_head = AuxHead(in_planes, num_classes=num_classes)
+
         out_ch = nf*fs*2
         self.reduction_cell_1 = ReductionCell(in_channels_left=in_ch, out_channels_left=out_ch,
                                               in_channels_right=in_ch, out_channels_right=out_ch)
@@ -549,6 +585,9 @@ class NASNet(nn.Module):
             next_out = next_cell(*cell_stack[:2])
             cell_stack = [next_out] + cell_stack
             cell_idx += 1
+
+        # stores most recent aux out in model
+        #self.aux_out = self.aux_head(cell_stack[0])
 
         x_reduction_cell_1 = self.reduction_cell_1(*cell_stack[:2])
         cell_stack = [x_reduction_cell_1] + cell_stack
@@ -666,7 +705,10 @@ if __name__ == "__main__":
     # saved with original
     #torch.save(model.state_dict(), "nasnet_state_dict.torch")
     state_dict = torch.load("nasnet_state_dict.torch")
-    model.load_state_dict(state_dict)
+    # partial loading https://github.com/pytorch/pytorch/issues/872
+    original_state_dict = model.state_dict()
+    original_state_dict.update(state_dict)
+    model.load_state_dict(original_state_dict)
 
     input = Variable(torch.randn(2,3,331,331))
     output = model(input)
