@@ -21,13 +21,15 @@ from torch.autograd import Variable
 
 
 parser = argparse.ArgumentParser(description='PyTorch CIFAR10 Training')
-parser.add_argument('--lr', default=0.04, type=float, help='learning rate')
+parser.add_argument('--lr', default=0.1, type=float, help='learning rate')
 parser.add_argument('--resume', '-r', action='store_true', help='resume from checkpoint')
+parser.add_argument('--lr_period', default=10, type=float, help='learning rate schedule restart period')
 args = parser.parse_args()
 
 use_cuda = torch.cuda.is_available()
 best_acc = 0  # best test accuracy
 start_epoch = 0  # start from epoch 0 or last checkpoint epoch
+N_EPOCHS = 60
 
 # Data
 print('==> Preparing data..')
@@ -50,6 +52,8 @@ testset = torchvision.datasets.CIFAR10(root='./data', train=False, download=True
 testloader = torch.utils.data.DataLoader(testset, batch_size=100, shuffle=False, num_workers=2)
 
 classes = ('plane', 'car', 'bird', 'cat', 'deer', 'dog', 'frog', 'horse', 'ship', 'truck')
+
+lr_period = args.lr_period*len(trainloader)
 
 # Model
 if args.resume:
@@ -82,18 +86,37 @@ if use_cuda:
 
 criterion = nn.CrossEntropyLoss()
 #optimizer = optim.SGD(net.parameters(), lr=args.lr, momentum=0.9, weight_decay=5e-4)
-optimizer = optim.RMSprop(net.parameters(), lr=args.lr)
+optimizer = optim.SGD(net.parameters(), lr=args.lr, momentum=0.9, weight_decay=1e-4, nesterov=False)
 
-global_idx = 0
+global_idx = start_epoch*len(trainloader)
 
-def cosine(idx):
-    radians = math.pi*(float(idx)/200.)
+def sgdr(period, batch_idx):
+    # returns normalised anytime sgdr schedule given period and batch_idx
+    # best performing settings reported in paper are T_0 = 10, T_mult=2
+    # so always use T_mult=2
+    batch_idx = float(batch_idx)
+    restart_period = period
+    while batch_idx/restart_period > 1.:
+        batch_idx = batch_idx - restart_period
+        restart_period = restart_period * 2.
+
+    radians = math.pi*(batch_idx/restart_period)
     return 0.5*(1.0 + math.cos(radians))
+
+def linear_schedule(period, idx):
+    total_steps = period*len(trainloader)
+    return 1.0 - float(idx)/total_steps
 
 def set_optimizer_lr(optimizer, lr):
     # callback to set the learning rate in an optimizer, without rebuilding the whole optimizer
     for param_group in optimizer.param_groups:
         param_group['lr'] = lr
+
+def adjust_keep_prob(model, new_keep_prob):
+    for m in model.modules():
+        if isinstance(m, DropPath):
+            m.keep_prob = new_keep_prob
+            m.p = 1.-new_keep_prob
 
 # Training
 def train(epoch):
@@ -104,16 +127,19 @@ def train(epoch):
     correct = 0
     total = 0
     for batch_idx, (inputs, targets) in enumerate(trainloader):
-        set_optimizer_lr(optimizer, args.lr*cosine(global_idx))
+        new_lr = args.lr*sgdr(lr_period, global_idx)
+        set_optimizer_lr(optimizer, new_lr)
+        new_keep_prob = 0.6 + 0.4*linear_schedule(len(trainloader)*100, global_idx)
+        adjust_keep_prob(net, new_keep_prob)
         if use_cuda:
             inputs, targets = inputs.cuda(), targets.cuda()
         optimizer.zero_grad()
         inputs, targets = Variable(inputs), Variable(targets)
         outputs = net(inputs)
         #if isinstance(net.module, NASNet):
-        if False:
-            outputs, aux_outputs = outputs[0], outputs[1]
-            aux_loss = criterion(aux_outputs, targets)
+        if hasattr(net, 'aux_out'):
+            # guess this the right weighting from tf slim training scripts
+            aux_loss = 0.4*criterion(net.aux_out, targets) 
         else:
             aux_loss = 0.0
         loss = criterion(outputs, targets) + aux_loss
@@ -127,8 +153,8 @@ def train(epoch):
         total += targets.size(0)
         correct += predicted.eq(targets.data).cpu().sum()
 
-        progress_bar(batch_idx, len(trainloader), 'Loss: %.3f | Acc: %.3f%% (%d/%d)'
-            % (train_loss/(batch_idx+1), 100.*correct/total, correct, total))
+        progress_bar(batch_idx, len(trainloader), 'Loss: %.3f | Acc: %.3f%% (%d/%d) | lr: %.3f | keep_prob: %.3f '
+            % (train_loss/(batch_idx+1), 100.*correct/total, correct, total, new_lr, new_keep_prob))
 
 def test(epoch):
     global best_acc
@@ -166,6 +192,6 @@ def test(epoch):
         best_acc = acc
 
 
-for epoch in range(start_epoch, start_epoch+200):
+for epoch in range(start_epoch, start_epoch+N_EPOCHS):
     train(epoch)
     test(epoch)
